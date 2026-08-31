@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blitzpack"
+version = "1.0.0"
+description = "Intelligent, size-tiered parallel compression engine producing seekable .blitz archives"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "BlitzPack Contributors" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Archiving :: Compression",
+]
+dependencies = [
+    "zstandard>=0.23.0",
+    "xxhash>=3.4.0",
+    "msgpack>=1.0.0",
+]
+
+[project.optional-dependencies]
+cli = ["rich>=13.0.0"]
+gui = ["sv-ttk>=2.6", "psutil>=5.9.0"]
+dev = ["pytest>=8.0.0"]
+all = ["rich>=13.0.0", "sv-ttk>=2.6", "psutil>=5.9.0", "pytest>=8.0.0"]
+
+[project.scripts]
+blitzpack = "cli:main"
+
+[project.gui-scripts]
+blitzpack-gui = "gui:main"
+
+[tool.setuptools.packages.find]
+include = ["blitzpack*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

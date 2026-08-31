@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyInstaller
+*.spec
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Test data & benchmark artifacts
+test folder/
+kitty_app.blitz
+kitty_app_extracted/
+_bench_data/
+bench/
+C:\bench_tmp/
+
+# Benchmark output files
+benchmark_output*.txt
+benchmark_kitty_results.txt
+benchmark_results.txt
+
+# Rust crate (deprecated — pure Python now)
+blitz_core/
+
+# Old planning / analysis docs (not part of the tool)
+BlitzPack_Complete_Blueprint.md
+feasibility_analysis.md
+competitive_analysis.md
+implementation_plan.md
+blitzpack_benchmark_prompt.md
+
+# Antigravity agent artifacts
+.gemini/
+benchmark.py

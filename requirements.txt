@@ -1,0 +1,14 @@
+# Core
+zstandard>=0.23.0
+xxhash>=3.4.0
+msgpack>=1.0.0
+
+# CLI (rich terminal output)
+rich>=13.0.0
+
+# GUI
+sv-ttk>=2.6
+psutil>=5.9.0
+
+# Dev / Testing
+pytest>=8.0.0
