@@ -20,6 +20,15 @@ from blitzpack.scheduler import WorkScheduler
 from blitzpack.utils import ProgressUpdate, format_bytes, format_throughput
 
 # Ensure safe rendering across all Windows legacy / UTF-8 terminals
+if sys.platform == "win32":
+    try:
+        if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 console = Console(highlight=False, legacy_windows=False)
 
 
