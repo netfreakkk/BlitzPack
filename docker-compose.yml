@@ -1,0 +1,7 @@
+﻿services:
+  blitzpack:
+    build: .
+    image: blitzpack:latest
+    volumes:
+      - .:/data
+    command: ["--help"]

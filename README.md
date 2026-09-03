@@ -54,15 +54,23 @@ pip install ".[all]"
 pip install -r requirements.txt
 ```
 
-### Optional: Windows I/O optimization
+### Docker
 
-On Windows, BlitzPack can use `pywin32` to open files with `FILE_FLAG_SEQUENTIAL_SCAN`, which hints the OS cache manager to increase read-ahead buffer sizes for sequential access patterns:
+You can run BlitzPack on any PC (Linux, macOS, or Windows) using Docker without installing Python or local dependencies:
 
 ```bash
-pip install pywin32
-```
+# Build the container image
+docker build -t blitzpack .
 
-This is entirely optional — BlitzPack works identically without it.
+# Compress a directory (mount current directory to /data)
+docker run --rm -v $(pwd):/data blitzpack compress /data/my_folder -o /data/my_folder.blitz --level 3 --workers 8
+
+# Extract an archive
+docker run --rm -v $(pwd):/data blitzpack decompress /data/my_folder.blitz -o /data/extracted
+
+# List archive contents
+docker run --rm -v $(pwd):/data blitzpack list /data/my_folder.blitz
+```
 
 ## Usage
 

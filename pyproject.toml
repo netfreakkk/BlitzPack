@@ -36,6 +36,9 @@ blitzpack = "cli:main"
 [project.gui-scripts]
 blitzpack-gui = "gui:main"
 
+[tool.setuptools]
+py-modules = ["cli", "gui"]
+
 [tool.setuptools.packages.find]
 include = ["blitzpack*"]
 
