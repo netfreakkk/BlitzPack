@@ -1,4 +1,4 @@
-﻿name: Release Standalone Binaries
+name: Release Standalone Binaries
 
 on:
   push:
@@ -28,14 +28,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install .[all] pyinstaller
 
-      - name: Compile Standalone Executable
+      - name: Compile Standalone Executables
         run: |
-          pyinstaller --noconfirm --clean --onefile --name blitzpack --collect-all blitzpack --collect-all zstandard --collect-all xxhash --collect-all msgpack --collect-all rich cli.py
+          pyinstaller --noconfirm --clean --onefile --name blitzpack --collect-all blitzpack --collect-all zstandard --collect-all xxhash --collect-all msgpack --collect-all rich --collect-all sv_ttk --collect-all psutil cli.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name blitzpack-gui --collect-all blitzpack --collect-all zstandard --collect-all xxhash --collect-all msgpack --collect-all sv_ttk --collect-all psutil gui.py
 
-      - name: Publish Executable to GitHub Releases
+      - name: Publish Executables to GitHub Releases
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: dist/blitzpack.exe
+          files: |
+            dist/blitzpack.exe
+            dist/blitzpack-gui.exe
           draft: false
           prerelease: false

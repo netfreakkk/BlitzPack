@@ -225,6 +225,17 @@ def handle_analyze(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # If launched with no arguments (e.g. user double-clicked the .exe in Windows Explorer):
+    if len(sys.argv) == 1:
+        try:
+            from gui import main as gui_main
+            gui_main()
+            return
+        except Exception as e:
+            console.print(f"[bold red]Failed to launch GUI:[/] {e}")
+            input("\nPress Enter to exit...")
+            return
+
     parser = argparse.ArgumentParser(
         prog="blitzpack",
         description="BlitzPack: Intelligent Parallel Compression Engine"
