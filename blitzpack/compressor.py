@@ -24,15 +24,6 @@ from .checksum import IncrementalHasher, compute_digest
 from .scheduler import CompressionJob, WorkScheduler
 from .utils import ProgressCallback, ProgressUpdate, sanitize_windows_path
 
-# Try pywin32 for FILE_FLAG_SEQUENTIAL_SCAN cache hinting
-try:
-    import win32file
-    import win32con
-    HAS_WIN32 = True
-except ImportError:
-    HAS_WIN32 = False
-
-
 @dataclass(slots=True)
 class CompressionResult:
     archive_path: Path
@@ -62,42 +53,22 @@ class JobResult:
 
 
 class SequentialReader:
-    """Reads jobs sequentially from disk. Caches open file handles for large files."""
+    """Reads jobs sequentially from disk using native C-accelerated file handles."""
     def __init__(self):
         self._current_path = None
-        self._current_handle = None
         self._current_py_f = None
 
     def _open(self, path: str):
         if self._current_path == path:
             return
         self._close()
-        
         self._current_path = path
-        if HAS_WIN32:
-            self._current_handle = win32file.CreateFile(
-                path,
-                win32con.GENERIC_READ,
-                win32con.FILE_SHARE_READ,
-                None,
-                win32con.OPEN_EXISTING,
-                win32con.FILE_FLAG_SEQUENTIAL_SCAN,
-                None,
-            )
-        else:
-            self._current_py_f = open(path, "rb")
+        self._current_py_f = open(path, "rb")
 
     def _read(self, length: int) -> bytes:
-        if HAS_WIN32:
-            _, data = win32file.ReadFile(self._current_handle, length)
-            return bytes(data)
-        else:
-            return self._current_py_f.read(length)
+        return self._current_py_f.read(length)
 
     def _close(self):
-        if self._current_handle:
-            win32file.CloseHandle(self._current_handle)
-            self._current_handle = None
         if self._current_py_f:
             self._current_py_f.close()
             self._current_py_f = None
@@ -108,34 +79,19 @@ class SequentialReader:
             path = sanitize_windows_path(job.source_entry.path)
             try:
                 self._open(path)
-                # Seek to the chunk's offset — required because multiple reader
-                # threads may each hold a separate handle to the same large file.
-                if HAS_WIN32:
-                    win32file.SetFilePointer(self._current_handle, job.offset, win32file.FILE_BEGIN)
-                else:
-                    self._current_py_f.seek(job.offset)
+                # Seek to chunk offset for multi-chunk files
+                self._current_py_f.seek(job.offset)
                 return self._read(job.length)
             except OSError:
                 return b""
         elif job.job_type == "bundle":
-            self._close() # Bundles touch multiple files, just close whatever is open
+            self._close()
             parts = []
             for member in job.bundle_members:
                 path = sanitize_windows_path(member.entry.path)
                 try:
-                    if HAS_WIN32:
-                        h = win32file.CreateFile(
-                            path, win32con.GENERIC_READ, win32con.FILE_SHARE_READ,
-                            None, win32con.OPEN_EXISTING, win32con.FILE_FLAG_SEQUENTIAL_SCAN, None
-                        )
-                        size = win32file.GetFileSize(h)
-                        if size > 0:
-                            _, data = win32file.ReadFile(h, size)
-                            parts.append(bytes(data))
-                        win32file.CloseHandle(h)
-                    else:
-                        with open(path, "rb") as f:
-                            parts.append(f.read())
+                    with open(path, "rb") as f:
+                        parts.append(f.read())
                 except OSError:
                     pass
             return b"".join(parts)
@@ -274,11 +230,12 @@ def compress(
 
     total_bytes = manifest.total_bytes
     bytes_done = 0
-    backend_str = "py-pipeline" + ("+win32" if HAS_WIN32 else "")
+    backend_str = "py-pipeline"
 
     # 4. Pipeline Execution
-    # Limit queue size to cap memory usage (e.g. max 16 chunks in memory = ~64MB)
-    read_queue = queue.Queue(maxsize=num_workers * 2)
+    # Start Reader Threads (scaled to overlap disk handle latency across bundles)
+    num_readers = max(12, num_workers * 2)
+    read_queue = queue.Queue(maxsize=num_readers * 2)
     write_queue = queue.Queue()
 
     # Start Worker Threads
@@ -288,8 +245,6 @@ def compress(
         t.start()
         worker_threads.append(t)
 
-    # Start Reader Threads (Use 4 dedicated I/O threads to mask Windows handle latency)
-    num_readers = 4
     read_jobs = queue.Queue()
     for job in ordered_jobs:
         read_jobs.put(job)

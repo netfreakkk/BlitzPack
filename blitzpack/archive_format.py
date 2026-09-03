@@ -77,6 +77,7 @@ class BlitzArchiveWriter:
         self._stream = stream
         self._default_chunk_size = default_chunk_size
         self._seek_entries: Dict[int, SeekEntry] = {}
+        self._archive_hasher = IncrementalHasher()
 
         # Reserve 32 bytes for the header (backpatched at finalize)
         self._stream.write(b"\x00" * HEADER_STRUCT.size)
@@ -93,6 +94,7 @@ class BlitzArchiveWriter:
         """Append a compressed frame sequentially — fast OS-buffered sequential write."""
         chunk_offset = self._stream.tell()
         self._stream.write(compressed_bytes)
+        self._archive_hasher.update(compressed_bytes)
         self._seek_entries[chunk_index] = SeekEntry(
             offset=chunk_offset,
             compressed_size=len(compressed_bytes),
@@ -148,8 +150,8 @@ class BlitzArchiveWriter:
         ], use_bin_type=True)
         self._stream.write(packed_manifest)
 
-        # 3. Compute order-independent archive digest by sequential re-read of settled chunk region
-        archive_digest = self._hash_chunk_region(seek_table_offset)
+        # 3. Use incrementally computed archive digest (zero disk re-read!)
+        archive_digest = self._archive_hasher.digest()
 
         # 4. Write footer
         self._stream.write(FOOTER_STRUCT.pack(
@@ -174,22 +176,6 @@ class BlitzArchiveWriter:
             seek_table_offset
         ))
         self._stream.flush()
-
-    def _hash_chunk_region(self, end_offset: int) -> int:
-        """Sequential re-read of chunk data for an order-independent archive digest.
-        Opens a separate read handle so the write stream stays positioned correctly."""
-        self._stream.flush()
-        hasher = IncrementalHasher()
-        with open(self._stream.name, "rb") as rf:
-            rf.seek(HEADER_STRUCT.size)
-            remaining = end_offset - HEADER_STRUCT.size
-            while remaining > 0:
-                buf = rf.read(min(4 * 1024 * 1024, remaining))
-                if not buf:
-                    break
-                hasher.update(buf)
-                remaining -= len(buf)
-        return hasher.digest()
 
 
 

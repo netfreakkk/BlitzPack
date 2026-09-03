@@ -26,20 +26,17 @@ ProgressCallback = Callable[[ProgressUpdate], None]
 def sanitize_windows_path(path: Path | str) -> str:
     """Apply the Windows extended-length prefix (\\\\?\\) if needed to avoid MAX_PATH (260) failures."""
     path_str = str(path)
-    if platform.system() != "Windows":
+    if platform.system() != "Windows" or path_str.startswith(("\\\\?\\", "\\\\.\\")):
+        return path_str
+
+    if len(path_str) < 240:
         return path_str
 
     abs_path = os.path.abspath(path_str)
-    if abs_path.startswith("\\\\?\\") or abs_path.startswith("\\\\.\\"):
-        return abs_path
-
-    if len(abs_path) >= 240:
-        if abs_path.startswith("\\\\"):
-            # UNC path: \\server\share -> \\?\UNC\server\share
-            return "\\\\?\\UNC\\" + abs_path[2:]
-        return "\\\\?\\" + abs_path
-
-    return abs_path
+    if abs_path.startswith("\\\\"):
+        # UNC path: \\server\share -> \\?\UNC\server\share
+        return "\\\\?\\UNC\\" + abs_path[2:]
+    return "\\\\?\\" + abs_path
 
 
 def format_bytes(byte_count: int | float) -> str:

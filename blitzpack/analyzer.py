@@ -77,7 +77,13 @@ class FileAnalyzer:
                             if dir_entry.is_dir(follow_symlinks=False) and not is_symlink:
                                 dirs_to_visit.append(Path(dir_entry.path))
                             else:
-                                item_entry = self._inspect_entry(Path(dir_entry.path), self.base_path)
+                                st = dir_entry.stat(follow_symlinks=False)
+                                item_entry = self._inspect_entry(
+                                    Path(dir_entry.path),
+                                    self.base_path,
+                                    st=st,
+                                    is_symlink=is_symlink
+                                )
                                 if item_entry:
                                     entries.append(item_entry)
                                     if item_entry.file_type == 0:
@@ -96,17 +102,26 @@ class FileAnalyzer:
 
         return FileManifest(entries=entries, base_dir=self.base_path, total_bytes=total_bytes)
 
-    def _inspect_entry(self, full_path: Path, base_dir: Path, is_dir: bool = False) -> Optional[FileEntry]:
-        sanitized = sanitize_windows_path(full_path)
-        try:
-            st = os.lstat(sanitized)
-        except (PermissionError, FileNotFoundError, OSError):
-            return None
+    def _inspect_entry(
+        self,
+        full_path: Path,
+        base_dir: Path,
+        is_dir: bool = False,
+        st: Optional[os.stat_result] = None,
+        is_symlink: bool = False
+    ) -> Optional[FileEntry]:
+        if st is None:
+            sanitized = sanitize_windows_path(full_path)
+            try:
+                st = os.lstat(sanitized)
+            except (PermissionError, FileNotFoundError, OSError):
+                return None
 
         rel_path = normalize_relative_path(full_path, base_dir)
 
-        if stat.S_ISLNK(st.st_mode):
+        if is_symlink or stat.S_ISLNK(st.st_mode):
             try:
+                sanitized = sanitize_windows_path(full_path)
                 target = os.readlink(sanitized)
             except OSError:
                 target = ""

@@ -11,6 +11,7 @@ from .analyzer import FileEntry, FileManifest
 
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024       # 4 MB
 DEFAULT_BUNDLE_TARGET = 4 * 1024 * 1024    # 4 MB
+DEFAULT_MAX_BUNDLE_MEMBERS = 256           # Maximum files in a single solid bundle
 
 
 @dataclass(slots=True)
@@ -40,9 +41,11 @@ class WorkScheduler:
         self,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         bundle_target: int = DEFAULT_BUNDLE_TARGET,
+        max_bundle_members: int = DEFAULT_MAX_BUNDLE_MEMBERS,
     ) -> None:
         self.chunk_size = chunk_size
         self.bundle_target = bundle_target
+        self.max_bundle_members = max_bundle_members
 
     def schedule(self, manifest: FileManifest) -> List[CompressionJob]:
         jobs: List[CompressionJob] = []
@@ -97,7 +100,7 @@ class WorkScheduler:
                 ))
                 current_bundle_size += entry.size
 
-                if current_bundle_size >= self.bundle_target:
+                if current_bundle_size >= self.bundle_target or len(current_bundle) >= self.max_bundle_members:
                     flush_bundle()
 
         # Flush any remaining items
