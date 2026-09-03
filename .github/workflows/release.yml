@@ -1,0 +1,41 @@
+﻿name: Release Standalone Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies & PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[all] pyinstaller
+
+      - name: Compile Standalone Executable
+        run: |
+          pyinstaller --noconfirm --clean --onefile --name blitzpack --collect-all blitzpack --collect-all zstandard --collect-all xxhash --collect-all msgpack --collect-all rich cli.py
+
+      - name: Publish Executable to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/blitzpack.exe
+          draft: false
+          prerelease: false
