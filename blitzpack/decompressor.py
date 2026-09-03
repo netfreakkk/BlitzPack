@@ -35,7 +35,7 @@ class ExtractTask:
     chunk_index: int
     seek_entry: SeekEntry
     raw_bytes: bytes
-    targets: List[Tuple[Path, int, int, int]]
+    targets: List[Tuple[Path, int, int, int, float]]
 
 
 _thread_local = threading.local()
@@ -75,8 +75,8 @@ def _decompress_worker_loop(read_queue: queue.Queue, result_queue: queue.Queue):
             read_queue.task_done()
             continue
 
-        # 3. Write all target files from this chunk
-        for target_path, start_off, end_off, file_dest_offset in task.targets:
+        # 3. Write all target files from this chunk and restore timestamps in parallel
+        for target_path, start_off, end_off, file_dest_offset, mtime in task.targets:
             sanitized_dest = sanitize_windows_path(target_path)
 
             if end_off == -1:
@@ -90,6 +90,10 @@ def _decompress_worker_loop(read_queue: queue.Queue, result_queue: queue.Queue):
                 slice_data = decompressed[start_off:end_off]
                 with open(sanitized_dest, "wb") as f_out:
                     f_out.write(slice_data)
+                try:
+                    os.utime(sanitized_dest, (mtime, mtime))
+                except OSError:
+                    pass
 
         bytes_written = len(decompressed)
         del decompressed
@@ -143,23 +147,27 @@ def decompress(
     with open(sanitize_windows_path(arc_p), "rb") as f_in:
         reader = BlitzArchiveReader(f_in)
 
-    out_p.mkdir(parents=True, exist_ok=True)
-
-    # 2. Recreate Directory Hierarchy
-    for entry in reader.manifest:
-        target_path = out_p / entry.path
-        if entry.file_type == 1:  # Directory
-            sanitized_target = sanitize_windows_path(target_path)
-            os.makedirs(sanitized_target, exist_ok=True)
-
-    # 3. Pre-create empty files and pre-allocate multi-chunk files
+    # 2 & 3. Recreate Directory Hierarchy and pre-allocate files in single pass
+    seen_dirs = set()
     for entry in reader.manifest:
         target_path = out_p / entry.path
         sanitized_target = sanitize_windows_path(target_path)
-        if entry.file_type == 0:
-            os.makedirs(os.path.dirname(sanitized_target), exist_ok=True)
+        if entry.file_type == 1:  # Directory
+            if sanitized_target not in seen_dirs:
+                os.makedirs(sanitized_target, exist_ok=True)
+                seen_dirs.add(sanitized_target)
+        elif entry.file_type == 0:
+            parent_dir = os.path.dirname(sanitized_target)
+            if parent_dir not in seen_dirs:
+                os.makedirs(parent_dir, exist_ok=True)
+                seen_dirs.add(parent_dir)
+
             if entry.size == 0:
                 with open(sanitized_target, "wb") as f_empty:
+                    pass
+                try:
+                    os.utime(sanitized_target, (entry.mtime, entry.mtime))
+                except OSError:
                     pass
             elif entry.start_chunk != entry.end_chunk:
                 # Pre-allocate large file so concurrent worker threads can write non-overlapping slices in r+b mode safely
@@ -167,8 +175,8 @@ def decompress(
                     f_large.seek(entry.size - 1)
                     f_large.write(b"\x00")
 
-    # 4. Map chunk index -> files/offsets to write
-    chunk_to_targets: Dict[int, List[Tuple[Path, int, int, int]]] = {
+    # 4. Map chunk index -> files/offsets to write (including mtime for parallel restoration)
+    chunk_to_targets: Dict[int, List[Tuple[Path, int, int, int, float]]] = {
         i: [] for i in range(len(reader.seek_entries))
     }
 
@@ -180,7 +188,7 @@ def decompress(
             target_path = out_p / entry.path
             for offset_in_span, chunk_idx in enumerate(range(entry.start_chunk, entry.end_chunk + 1)):
                 file_dest_offset = offset_in_span * (4 * 1024 * 1024)
-                chunk_to_targets[chunk_idx].append((target_path, 0, -1, file_dest_offset))
+                chunk_to_targets[chunk_idx].append((target_path, 0, -1, file_dest_offset, entry.mtime))
         else:
             # Single chunk (or bundle member)
             target_path = out_p / entry.path
@@ -188,7 +196,8 @@ def decompress(
                 target_path,
                 entry.start_offset,
                 entry.end_offset,
-                0
+                0,
+                entry.mtime
             ))
 
     total_bytes = reader.footer.total_original_size
@@ -245,7 +254,7 @@ def decompress(
         t.join()
     reader_thread.join()
 
-    # 6. Restore Symlinks & Metadata (Timestamps / Permissions)
+    # 6. Restore Symlinks, Directory Timestamps, and Multi-chunk File Timestamps
     for entry in reader.manifest:
         target_path = out_p / entry.path
         sanitized_target = sanitize_windows_path(target_path)
@@ -259,13 +268,14 @@ def decompress(
                 except OSError:
                     pass
 
-        try:
-            if os.path.exists(sanitized_target) and not os.path.islink(sanitized_target):
+        # Only touch directory timestamps and multi-chunk files (single/bundle files were timestamped in workers)
+        if entry.file_type == 1 or (entry.file_type == 0 and entry.start_chunk != entry.end_chunk):
+            try:
                 os.utime(sanitized_target, (entry.mtime, entry.mtime))
                 if os.name != "nt" and entry.permissions:
                     os.chmod(sanitized_target, entry.permissions)
-        except OSError:
-            pass
+            except OSError:
+                pass
 
     total_duration = time.perf_counter() - start_time
     throughput = (total_bytes / (1024 * 1024)) / total_duration if total_duration > 0 else 0.0
