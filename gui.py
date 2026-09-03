@@ -35,10 +35,10 @@ from blitzpack.utils import ProgressUpdate, format_bytes, format_throughput, san
 
 
 LEVEL_PROFILES = {
-    "Level 1 - Fast (Maximum Speed)": 1,
-    "Level 3 - Balanced (Default / Recommended)": 3,
-    "Level 9 - High (Better Compression)": 9,
-    "Level 19 - Ultra (Maximum Compression)": 19,
+    "Fast": 1,
+    "Balanced": 3,
+    "High": 9,
+    "Ultra": 19,
 }
 
 
@@ -199,7 +199,7 @@ class AddToArchiveDialog(tk.Toplevel):
             state="readonly",
             font=("Segoe UI", 10),
         )
-        self.cmb_profile.set("Level 3 - Balanced (Default / Recommended)")
+        self.cmb_profile.set("Balanced")
         self.cmb_profile.pack(fill="x", pady=(4, 15))
 
         # CPU Worker Threads

@@ -40,12 +40,24 @@ def handle_compress(args: argparse.Namespace) -> None:
 
     out_path = Path(args.output).resolve() if args.output else in_path.with_suffix(".blitz")
     workers = args.workers or os.cpu_count() or 4
-    level = args.level
+    
+    raw_level = str(args.level).lower().strip()
+    profile_map = {"fast": 1, "balanced": 3, "high": 9, "ultra": 19}
+    if raw_level in profile_map:
+        level = profile_map[raw_level]
+        profile_name = raw_level.capitalize()
+    else:
+        try:
+            level = int(raw_level)
+            profile_name = {1: "Fast", 3: "Balanced", 9: "High", 19: "Ultra"}.get(level, f"Level {level}")
+        except ValueError:
+            level = 3
+            profile_name = "Balanced"
 
     console.print(Panel(
         f"[bold cyan]Input:[/] {in_path}\n"
         f"[bold cyan]Output:[/] {out_path}\n"
-        f"[bold cyan]Threads:[/] {workers} workers  |  [bold cyan]Level:[/] {level}",
+        f"[bold cyan]Threads:[/] {workers} workers  |  [bold cyan]Profile:[/] {profile_name}",
         title="BlitzPack Compress",
         border_style="cyan"
     ))
@@ -223,7 +235,7 @@ def main() -> None:
     p_comp = subparsers.add_parser("compress", help="Compress files or folders into a .blitz archive")
     p_comp.add_argument("input", help="Source folder or file path")
     p_comp.add_argument("-o", "--output", help="Output .blitz archive file path")
-    p_comp.add_argument("-l", "--level", type=int, default=3, help="Zstd compression level 1-19 (default: 3)")
+    p_comp.add_argument("-l", "--level", default="balanced", help="Compression profile: fast, balanced (default), high, ultra")
     p_comp.add_argument("-w", "--workers", type=int, default=0, help="CPU worker count (default: all cores)")
     p_comp.set_defaults(func=handle_compress)
 

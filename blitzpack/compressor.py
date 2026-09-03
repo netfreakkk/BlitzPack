@@ -152,16 +152,29 @@ def _reader_thread_func(read_jobs: queue.Queue, read_queue: queue.Queue, write_q
         write_queue.put(e)
 
 
+LEVEL_PROFILES: Dict[str, int] = {
+    "fast": 1,
+    "balanced": 3,
+    "high": 9,
+    "ultra": 19,
+}
+
+
 def compress(
     input_path: Path | str,
     output_path: Path | str,
-    level: int = 3,
+    level: int | str = 3,
     workers: int = 0,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> CompressionResult:
     in_p = Path(input_path).resolve()
     out_p = Path(output_path).resolve()
     num_workers = workers or os.cpu_count() or 4
+
+    if isinstance(level, str):
+        level_int = LEVEL_PROFILES.get(level.lower().strip(), 3)
+    else:
+        level_int = int(level)
 
     start_time = time.perf_counter()
 
@@ -241,7 +254,7 @@ def compress(
     # Start Worker Threads
     worker_threads = []
     for _ in range(num_workers):
-        t = threading.Thread(target=_worker_loop, args=(level, read_queue, write_queue), daemon=True)
+        t = threading.Thread(target=_worker_loop, args=(level_int, read_queue, write_queue), daemon=True)
         t.start()
         worker_threads.append(t)
 
