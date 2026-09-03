@@ -209,7 +209,7 @@ class AddToArchiveDialog(tk.Toplevel):
 
         cpu_count = os.cpu_count() or 4
         self.spn_workers = ttk.Spinbox(threads_frame, from_=1, to=64, width=6)
-        self.spn_workers.set(min(4, cpu_count))
+        self.spn_workers.set(cpu_count)
         self.spn_workers.pack(side="left", padx=(0, 10))
 
         ttk.Label(
@@ -307,7 +307,7 @@ class ExtractArchiveDialog(tk.Toplevel):
 
         ttk.Label(threads_frame, text="Worker Threads:").pack(side="left", padx=(0, 8))
         cpu_count = os.cpu_count() or 4
-        default_workers = min(4, cpu_count)
+        default_workers = cpu_count
         self.spn_workers = ttk.Spinbox(threads_frame, from_=1, to=64, width=6)
         self.spn_workers.set(default_workers)
         self.spn_workers.pack(side="left", padx=(0, 8))
