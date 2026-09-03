@@ -77,17 +77,14 @@ docker run --rm -v $(pwd):/data blitzpack list /data/my_folder.blitz
 ### CLI
 
 ```bash
-# Compress a directory
-blitzpack compress ./my_project -o project.blitz --level 3 --workers 8
+# Compress a directory (profiles: fast, balanced [default], high, ultra)
+blitzpack compress ./my_project -o project.blitz --level balanced --workers 8
 
 # Extract an archive
-blitzpack extract project.blitz -o ./restored
+blitzpack decompress project.blitz -o ./restored
 
 # Inspect archive contents
-blitzpack info project.blitz
-
-# Verify archive integrity
-blitzpack test project.blitz
+blitzpack list project.blitz
 ```
 
 ### GUI
