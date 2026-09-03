@@ -37,6 +37,15 @@ Reader threads pull jobs from a shared queue in directory-traversal order. Each 
 
 ## Installation
 
+### Standalone Windows Executables (No Python Required)
+
+Pre-compiled standalone binaries are included directly in the [`bin/`](bin/) directory:
+
+* **Desktop GUI:** [`bin/blitzpack-gui.exe`](bin/blitzpack-gui.exe) — Double-click to launch the WinRAR-style desktop application (no console window).
+* **CLI Engine:** [`bin/blitzpack.exe`](bin/blitzpack.exe) — High-throughput parallel archiver for scripts and terminal use (auto-launches GUI on double-click).
+
+### From Source (Python)
+
 ```bash
 # Core library only
 pip install .
