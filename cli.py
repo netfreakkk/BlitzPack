@@ -10,6 +10,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
+from blitzpack.archive_format import ArchiveFormatError
 from blitzpack import (
     BlitzArchiveReader,
     FileAnalyzer,
@@ -188,11 +189,18 @@ def handle_list(args: argparse.Namespace) -> None:
 
 def handle_analyze(args: argparse.Namespace) -> None:
     in_path = Path(args.input).resolve()
+    if not in_path.exists():
+        console.print(f"[bold red]Error:[/] Target path does not exist: {in_path}")
+        sys.exit(1)
+
     analyzer = FileAnalyzer(in_path)
     manifest = analyzer.scan()
     classified = analyzer.classify(manifest)
     scheduler = WorkScheduler()
-    jobs = scheduler.schedule(classified)
+    jobs = scheduler.schedule(manifest)
+
+    chunk_jobs = sum(1 for j in jobs if j.job_type == "chunk")
+    bundle_jobs = sum(1 for j in jobs if j.job_type == "bundle")
 
     table = Table(title="File Profiling & Scheduling Plan", show_lines=True)
     table.add_column("Category", style="cyan")
@@ -201,28 +209,81 @@ def handle_analyze(args: argparse.Namespace) -> None:
     table.add_column("Scheduled Strategy", style="dim")
 
     table.add_row(
-        "Large (>16 MB)",
-        str(len(classified.large)),
-        format_bytes(sum(f.size for f in classified.large)),
-        "Split into 4 MB chunks"
+        f"Chunked (>= {format_bytes(scheduler.chunk_size)})",
+        str(len(classified.chunked)),
+        format_bytes(sum(f.size for f in classified.chunked)),
+        f"Split into {format_bytes(scheduler.chunk_size)} chunks, one job per chunk",
     )
     table.add_row(
-        "Medium (64 KB - 16 MB)",
-        str(len(classified.medium)),
-        format_bytes(sum(f.size for f in classified.medium)),
-        "Individual 1:1 compression jobs"
+        f"Bundled (< {format_bytes(scheduler.chunk_size)})",
+        str(len(classified.bundled)),
+        format_bytes(sum(f.size for f in classified.bundled)),
+        f"Packed in traversal order into ~{format_bytes(scheduler.bundle_target)} "
+        f"solid blocks (max {scheduler.max_bundle_members} files each)",
     )
-    table.add_row(
-        "Small (<64 KB)",
-        str(len(classified.small)),
-        format_bytes(sum(f.size for f in classified.small)),
-        "Bundled by file extension into ~4 MB solid batches"
-    )
+    table.add_row("Empty files", str(len(classified.empty)), "-", "Manifest-only, no chunk")
+    table.add_row("Directories", str(len(classified.directories)), "-", "Manifest-only")
+    table.add_row("Symlinks", str(len(classified.symlinks)), "-", "Manifest-only")
 
     console.print()
     console.print(table)
-    console.print(f"\n[bold]Dispatch Plan:[/] Generated [bold green]{len(jobs)}[/] parallel jobs sorted by LPT for optimal thread utilization.\n")
+    console.print(
+        f"\n[bold]Dispatch plan:[/] {len(jobs)} jobs "
+        f"([bold green]{chunk_jobs}[/] chunk, [bold green]{bundle_jobs}[/] bundle), "
+        f"emitted in directory-traversal order.\n"
+    )
 
+
+def handle_verify(args: argparse.Namespace) -> None:
+    arc_path = Path(args.archive).resolve()
+    if not arc_path.is_file():
+        console.print(f"[bold red]Error:[/] Archive file does not exist: {arc_path}")
+        sys.exit(1)
+
+    mode = "deep (every chunk decompressed)" if args.deep else "fast (whole-archive digest)"
+    console.print(Panel(
+        f"[bold cyan]Archive:[/] {arc_path}\n[bold cyan]Mode:[/] {mode}",
+        title="BlitzPack Verify",
+        border_style="cyan",
+    ))
+
+    start = time.perf_counter()
+    try:
+        with open(arc_path, "rb") as f:
+            reader = BlitzArchiveReader(f)
+            if args.deep:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    TimeRemainingColumn(),
+                    console=console,
+                ) as progress:
+                    task_id = progress.add_task("Verifying chunks...", total=len(reader.seek_entries))
+                    reader.verify(deep=True, progress_callback=lambda done, total: progress.update(task_id, completed=done, total=total))
+            else:
+                reader.verify(deep=False)
+            entry_count = len(reader.manifest)
+            chunk_count = len(reader.seek_entries)
+            original = reader.footer.total_original_size
+    except (ArchiveFormatError, OSError) as exc:
+        console.print(Panel(
+            f"[bold red]Verification FAILED[/]\n\n{exc}",
+            title="Corrupt Archive",
+            border_style="red",
+        ))
+        sys.exit(2)
+
+    console.print(Panel(
+        f"[bold green]Archive is intact.[/]\n\n"
+        f"Entries:          {entry_count}\n"
+        f"Chunks verified:  {chunk_count}\n"
+        f"Original Size:    {format_bytes(original)}\n"
+        f"Elapsed:          {time.perf_counter() - start:.2f}s",
+        title="Verification Complete",
+        border_style="green",
+    ))
 
 def main() -> None:
     # If launched with no arguments (e.g. user double-clicked the .exe in Windows Explorer):
@@ -248,6 +309,7 @@ def main() -> None:
     p_comp.add_argument("-o", "--output", help="Output .blitz archive file path")
     p_comp.add_argument("-l", "--level", default="balanced", help="Compression profile: fast, balanced (default), high, ultra")
     p_comp.add_argument("-w", "--workers", type=int, default=0, help="CPU worker count (default: all cores)")
+    p_comp.add_argument("-r", "--readers", type=int, default=0, help="Disk reader threads (default: auto; use 1-2 for spinning disks)")
     p_comp.set_defaults(func=handle_compress)
 
     # Decompress
@@ -261,6 +323,18 @@ def main() -> None:
     p_list = subparsers.add_parser("list", help="List archive entries")
     p_list.add_argument("archive", help="Path to .blitz archive")
     p_list.set_defaults(func=handle_list)
+
+    # Verify
+    p_verify = subparsers.add_parser(
+        "verify", aliases=["test"], help="Check archive integrity without extracting"
+    )
+    p_verify.add_argument("archive", help="Path to .blitz archive")
+    p_verify.add_argument(
+        "--deep",
+        action="store_true",
+        help="Also decompress and checksum every chunk (slower, catches everything)",
+    )
+    p_verify.set_defaults(func=handle_verify)
 
     # Analyze
     p_analyze = subparsers.add_parser("analyze", help="Profile files and display scheduling breakdown (dry run)")

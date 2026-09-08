@@ -8,7 +8,7 @@ import struct
 from typing import BinaryIO, Dict, Generator, List, Optional
 import msgpack
 
-from .checksum import IncrementalHasher
+from .checksum import IncrementalHasher, compute_digest, compute_stream_digest
 
 HEADER_MAGIC = b"BLTZ"
 FOOTER_MAGIC = b"BLTZEND\x00"
@@ -17,7 +17,8 @@ CODEC_ZSTD = 1
 CODEC_STORED = 0           # raw, uncompressed chunk
 FLAG_STORED = 1            # bit 0 of SeekEntry.flags: chunk is stored raw
 
-HEADER_STRUCT = struct.Struct("<4sHBIH11sQ")    # 32 bytes
+HEADER_STRUCT = struct.Struct("<4sHBIH11sQ")
+CHUNK_DATA_START = HEADER_STRUCT.size    # 32 bytes
 SEEK_ENTRY_STRUCT = struct.Struct("<QIIQII")    # 32 bytes
 FOOTER_STRUCT = struct.Struct("<QQQQII8s")      # 48 bytes
 
@@ -294,3 +295,69 @@ class BlitzArchiveReader:
         if len(chunk_data) != entry.compressed_size:
             raise ArchiveFormatError(f"Unexpected EOF reading chunk {chunk_index}")
         return entry, chunk_data
+
+    def verify_layout(self) -> None:
+        """Check that chunk frames are contiguous and cover the whole data region."""
+        expected = CHUNK_DATA_START
+        for idx, entry in enumerate(self.seek_entries):
+            if entry.offset != expected:
+                raise ArchiveFormatError(
+                    f"Chunk {idx} starts at {entry.offset} but the previous frame ends at "
+                    f"{expected} (seek table is not contiguous)"
+                )
+            expected += entry.compressed_size
+        if expected != self.footer.seek_table_offset:
+            raise ArchiveFormatError(
+                f"Chunk data ends at {expected} but the seek table starts at "
+                f"{self.footer.seek_table_offset}"
+            )
+
+    def verify(self, deep: bool = False, progress_callback=None) -> None:
+        """Verify archive integrity, raising ArchiveFormatError on any mismatch.
+
+        Always: structural layout plus the whole-archive digest over the chunk-data
+        region (one sequential read, no decompression).
+        With deep=True: additionally decompress every chunk in the seek table and
+        check its per-chunk digest, including chunks no manifest entry references.
+        """
+        if self.footer.archive_digest == 0:
+            raise ArchiveFormatError(
+                "Archive footer was not recoverable, so the whole-archive digest is "
+                "unavailable; re-create this archive from source"
+            )
+
+        self.verify_layout()
+
+        actual = compute_stream_digest(
+            self._stream, CHUNK_DATA_START, self.footer.seek_table_offset
+        )
+        if actual != self.footer.archive_digest:
+            raise ArchiveFormatError(
+                f"Whole-archive digest mismatch: expected "
+                f"{self.footer.archive_digest:#018x}, got {actual:#018x}"
+            )
+
+        if not deep:
+            return
+
+        import zstandard as zstd
+
+        dctx = zstd.ZstdDecompressor()
+        total = len(self.seek_entries)
+        for idx in range(total):
+            entry, raw = self.read_raw_chunk(idx)
+            if entry.flags & FLAG_STORED:
+                data = raw
+            else:
+                data = dctx.decompress(raw, max_output_size=entry.original_size + 65536)
+            if len(data) != entry.original_size:
+                raise ArchiveFormatError(
+                    f"Chunk {idx} decompressed to {len(data)} bytes, expected "
+                    f"{entry.original_size}"
+                )
+            if compute_digest(data) != entry.digest:
+                raise ArchiveFormatError(
+                    f"Chunk {idx} digest mismatch (expected {entry.digest:#018x})"
+                )
+            if progress_callback:
+                progress_callback(idx + 1, total)

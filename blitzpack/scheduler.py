@@ -8,10 +8,11 @@ proximity rather than extension, acting like a tarball for maximum disk sequenti
 from dataclasses import dataclass, field
 from typing import List, Optional
 from .analyzer import FileEntry, FileManifest
+from .constants import BUNDLE_TARGET, CHUNK_SIZE, MAX_BUNDLE_MEMBERS
 
-DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024       # 4 MB
-DEFAULT_BUNDLE_TARGET = 4 * 1024 * 1024    # 4 MB
-DEFAULT_MAX_BUNDLE_MEMBERS = 256           # Maximum files in a single solid bundle
+DEFAULT_CHUNK_SIZE = CHUNK_SIZE
+DEFAULT_BUNDLE_TARGET = BUNDLE_TARGET
+DEFAULT_MAX_BUNDLE_MEMBERS = MAX_BUNDLE_MEMBERS
 
 
 @dataclass(slots=True)

@@ -7,8 +7,10 @@ import stat
 from typing import Dict, List, Optional, Set
 from .utils import normalize_relative_path, sanitize_windows_path
 
-LARGE_THRESHOLD = 16 * 1024 * 1024   # > 16 MB
-SMALL_THRESHOLD = 64 * 1024          # < 64 KB
+from .constants import CHUNK_SIZE
+
+# A file is chunked if the scheduler will split it, and bundled otherwise.
+CHUNKED_THRESHOLD = CHUNK_SIZE
 
 
 @dataclass(slots=True)
@@ -26,9 +28,9 @@ class FileEntry:
 
 @dataclass(slots=True)
 class ClassifiedFiles:
-    large: List[FileEntry] = field(default_factory=list)
-    medium: List[FileEntry] = field(default_factory=list)
-    small: List[FileEntry] = field(default_factory=list)
+    chunked: List[FileEntry] = field(default_factory=list)
+    bundled: List[FileEntry] = field(default_factory=list)
+    empty: List[FileEntry] = field(default_factory=list)
     directories: List[FileEntry] = field(default_factory=list)
     symlinks: List[FileEntry] = field(default_factory=list)
     total_bytes: int = 0
@@ -171,11 +173,11 @@ class FileAnalyzer:
             else:
                 result.total_files += 1
                 result.total_bytes += entry.size
-                if entry.size > LARGE_THRESHOLD:
-                    result.large.append(entry)
-                elif entry.size < SMALL_THRESHOLD:
-                    result.small.append(entry)
+                if entry.size == 0:
+                    result.empty.append(entry)
+                elif entry.size >= CHUNKED_THRESHOLD:
+                    result.chunked.append(entry)
                 else:
-                    result.medium.append(entry)
+                    result.bundled.append(entry)
 
         return result

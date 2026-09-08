@@ -41,11 +41,11 @@ def sanitize_windows_path(path: Path | str) -> str:
 
 def format_bytes(byte_count: int | float) -> str:
     """Convert raw byte count into human-readable notation."""
-    units = ["B", "KB", "MB", "GB", "TB"]
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
     val = float(byte_count)
     for unit in units:
-        if val < 1024.0 or unit == "TB":
-            return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} B"
+        if val < 1024.0 or unit == units[-1]:
+            return f"{int(val)} B" if unit == "B" else f"{val:.1f} {unit}"
         val /= 1024.0
     return f"{val:.1f} PB"
 

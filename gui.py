@@ -1362,13 +1362,10 @@ class BlitzPackMainWindow(tk.Tk):
             try:
                 with open(sanitize_windows_path(archive_path), "rb") as f_in:
                     reader = BlitzArchiveReader(f_in)
-                    errors = reader.verify_all_checksums(f_in)
+                    reader.verify(deep=False)
 
-                if errors:
-                    self.after(0, lambda: self.lbl_perf_op.configure(text=f"❌ {len(errors)} Corrupted Chunks!"))
-                else:
-                    self.after(0, lambda: self.lbl_perf_op.configure(text=f"🛡️ Verified 100% (Zero Corruption)"))
-                    self.after(0, lambda: self.lbl_perf_metrics.configure(text="xxHash64 Checksums 100% Valid"))
+                self.after(0, lambda: self.lbl_perf_op.configure(text="🛡️ Verified 100% (Zero Corruption)"))
+                self.after(0, lambda: self.lbl_perf_metrics.configure(text="xxHash64 Whole-Archive & Seek Table Valid"))
                 self.after(0, lambda: self.prog_bar.configure(value=100))
             except Exception as ex:
                 self.after(0, lambda: self.lbl_perf_op.configure(text=f"❌ Test Failed: {str(ex)[:30]}"))

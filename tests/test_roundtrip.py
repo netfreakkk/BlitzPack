@@ -49,7 +49,7 @@ def test_empty_files_and_directories(tmp_path: Path):
 
 
 def test_small_file_bundling_fidelity(tmp_path: Path):
-    """Test that thousands of small files bundled by extension unpack byte-identical."""
+    """Test that thousands of small files bundled in traversal order unpack byte-identical."""
     src = tmp_path / "bundle_src"
     src.mkdir()
 
@@ -73,7 +73,7 @@ def test_small_file_bundling_fidelity(tmp_path: Path):
     assert original_hashes == extracted_hashes
 
 
-def test_large_file_chunking_with_overlap(tmp_path: Path):
+def test_large_file_chunking_roundtrip(tmp_path: Path):
     """Test large file (>16 MB) splitting across 4MB chunks and seamless reassembly."""
     src = tmp_path / "large_src"
     src.mkdir()

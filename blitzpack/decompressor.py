@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import zstandard as zstd
 
-from .archive_format import BlitzArchiveReader, SeekEntry, FLAG_STORED
+from .archive_format import ArchiveFormatError, BlitzArchiveReader, SeekEntry, FLAG_STORED
 from .checksum import compute_digest
 from .utils import ProgressCallback, ProgressUpdate, sanitize_windows_path
 
@@ -202,18 +203,23 @@ def decompress(
     archive_path: Path | str,
     output_dir: Path | str,
     workers: int = 0,
+    verify_first: bool = False,
+    cleanup_on_error: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> DecompressionResult:
     """Extract a .blitz archive in parallel with full directory, permission, and timestamp restoration."""
     arc_p = Path(archive_path).resolve()
     out_p = Path(output_dir).resolve()
     num_workers = workers or os.cpu_count() or 4
+    created_output_root = not out_p.exists()
 
     start_time = time.perf_counter()
 
-    # 1. Read Archive Structure
+    # 1. Read Archive Structure & Optional Pre-flight Verification
     with open(sanitize_windows_path(arc_p), "rb") as f_in:
         reader = BlitzArchiveReader(f_in)
+        if verify_first:
+            reader.verify(deep=False)
 
     # 2. Recreate Directory Hierarchy
     seen_dirs = set()
@@ -234,7 +240,7 @@ def decompress(
                 with open(sanitized_target, "wb") as f_empty:
                     pass
 
-    # 3. Map chunk index -> targets
+    # 3. Map chunk index -> targets with dynamic seek table offset accumulation
     chunk_to_targets: Dict[int, List[ExtractTarget]] = {
         i: [] for i in range(len(reader.seek_entries))
     }
@@ -246,18 +252,28 @@ def decompress(
         target_path = out_p / entry.path
         if entry.start_chunk != entry.end_chunk:
             total_chunks = entry.end_chunk - entry.start_chunk + 1
-            for offset_in_span, chunk_idx in enumerate(range(entry.start_chunk, entry.end_chunk + 1)):
+            running = 0
+            for chunk_idx in range(entry.start_chunk, entry.end_chunk + 1):
+                if not 0 <= chunk_idx < len(reader.seek_entries):
+                    raise ArchiveFormatError(
+                        f"Manifest entry {entry.path!r} references out-of-range chunk {chunk_idx}"
+                    )
                 chunk_to_targets[chunk_idx].append(
                     ExtractTarget(
                         target_path=target_path,
                         start_offset=0,
                         end_offset=-1,
                         is_multi_chunk=True,
-                        file_offset=offset_in_span * (4 * 1024 * 1024),
+                        file_offset=running,
                         total_file_size=entry.size,
                         total_file_chunks=total_chunks,
                         mtime=entry.mtime,
                     )
+                )
+                running += reader.seek_entries[chunk_idx].original_size
+            if running != entry.size:
+                raise ArchiveFormatError(
+                    f"Chunk span for {entry.path!r} covers {running} bytes but the manifest records {entry.size}"
                 )
         else:
             chunk_to_targets[entry.start_chunk].append(
@@ -310,43 +326,51 @@ def decompress(
     completed_chunks = 0
     last_callback_time = 0.0
 
-    while completed_chunks < total_valid_chunks:
-        if not error_queue.empty():
-            raise error_queue.get()
+    try:
+        while completed_chunks < total_valid_chunks:
+            if not error_queue.empty():
+                raise error_queue.get()
 
-        try:
-            res = result_queue.get(timeout=0.1)
-        except queue.Empty:
-            continue
+            try:
+                res = result_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
 
-        bytes_done += res
-        completed_chunks += 1
+            bytes_done += res
+            completed_chunks += 1
 
-        now = time.perf_counter()
-        if progress_callback and (now - last_callback_time >= 0.1 or completed_chunks == total_valid_chunks):
-            last_callback_time = now
-            elapsed = now - start_time
-            speed = bytes_done / elapsed if elapsed > 0 else 0
-            progress_callback(
-                ProgressUpdate(
-                    phase="decompressing",
-                    files_processed=len(reader.manifest),
-                    total_files=len(reader.manifest),
-                    bytes_processed=bytes_done,
-                    total_bytes=total_bytes,
-                    current_speed_bps=speed,
-                    message=f"Extracting ({num_workers} workers)...",
+            now = time.perf_counter()
+            if progress_callback and (now - last_callback_time >= 0.1 or completed_chunks == total_valid_chunks):
+                last_callback_time = now
+                elapsed = now - start_time
+                speed = bytes_done / elapsed if elapsed > 0 else 0
+                progress_callback(
+                    ProgressUpdate(
+                        phase="decompressing",
+                        files_processed=len(reader.manifest),
+                        total_files=len(reader.manifest),
+                        bytes_processed=bytes_done,
+                        total_bytes=total_bytes,
+                        current_speed_bps=speed,
+                        message=f"Extracting ({num_workers} workers)...",
+                    )
                 )
-            )
+    except BaseException:
+        if cleanup_on_error and created_output_root and out_p.exists():
+            shutil.rmtree(out_p, ignore_errors=True)
+        raise
+    finally:
+        for _ in range(num_workers):
+            try:
+                read_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        for t in worker_threads:
+            t.join(timeout=5)
+        reader_thread.join(timeout=5)
+        writer_thread.join(timeout=5)
 
-    for _ in range(num_workers):
-        read_queue.put(None)
-    for t in worker_threads:
-        t.join()
-    reader_thread.join()
-    writer_thread.join()
-
-    # 5. Restore Symlinks and Timestamps
+    # 5. Restore Symlinks, Permissions, and Timestamps
     for entry in reader.manifest:
         target_path = out_p / entry.path
         sanitized_target = sanitize_windows_path(target_path)
@@ -358,11 +382,17 @@ def decompress(
                 os.symlink(entry.symlink_target, sanitized_target)
             except OSError:
                 pass
-        elif entry.mtime:
-            try:
-                os.utime(sanitized_target, (entry.mtime, entry.mtime))
-            except OSError:
-                pass
+        else:
+            if os.name != "nt" and entry.permissions:
+                try:
+                    os.chmod(sanitized_target, entry.permissions)
+                except OSError:
+                    pass
+            if entry.mtime:
+                try:
+                    os.utime(sanitized_target, (entry.mtime, entry.mtime))
+                except OSError:
+                    pass
 
     total_duration = time.perf_counter() - start_time
     throughput = (total_bytes / (1024 * 1024)) / total_duration if total_duration > 0 else 0.0

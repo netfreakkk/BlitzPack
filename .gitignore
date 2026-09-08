@@ -5,6 +5,8 @@ __pycache__/
 *.so
 *.pyd
 *.egg-info/
+# Locally built binaries — released via GitHub Releases, never committed
+bin/
 dist/
 build/
 *.egg
