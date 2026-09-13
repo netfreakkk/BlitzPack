@@ -296,3 +296,13 @@ def test_cancellation_stops_pipeline(tmp_path: Path):
         compress(src, archive, level=1, cancel_event=cancel)
 
     assert not archive.exists()
+
+    # Verify decompress cancellation
+    valid_archive = tmp_path / "valid.blitz"
+    compress(src, valid_archive, level=1)
+    cancel_decomp = threading.Event()
+    cancel_decomp.set()
+
+    dest = tmp_path / "out_cancelled"
+    with pytest.raises(BlitzCancelled):
+        decompress(valid_archive, dest, cancel_event=cancel_decomp)

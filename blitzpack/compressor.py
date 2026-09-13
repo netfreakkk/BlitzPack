@@ -469,6 +469,8 @@ def compress(
                             ),
                         ))
 
+            if deterministic:
+                manifest_entries.sort(key=lambda e: e.path)
             writer.finalize(manifest_entries=manifest_entries, total_original_size=total_bytes)
     except BaseException:
         if temp_archive_path.exists():

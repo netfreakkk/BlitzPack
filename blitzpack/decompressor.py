@@ -458,7 +458,7 @@ def decompress(
                     import ctypes
                     settable = entry.win_attrs & 0x27  # READONLY | HIDDEN | SYSTEM | ARCHIVE
                     if settable:
-                        ctypes.windll.kernel32.SetFileAttributesW(str(target_path), settable)
+                        ctypes.windll.kernel32.SetFileAttributesW(str(sanitized_target), settable)
                 except Exception:
                     pass
 

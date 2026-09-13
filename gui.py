@@ -39,7 +39,7 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 from blitzpack.archive_format import BlitzArchiveReader
 from blitzpack.compressor import CompressionResult, compress
 from blitzpack.decompressor import DecompressionResult, decompress
-from blitzpack.utils import ProgressUpdate, format_bytes, sanitize_windows_path
+from blitzpack.utils import BlitzCancelled, ProgressUpdate, format_bytes, sanitize_windows_path
 
 
 # -----------------------------------------------------------------------------
@@ -479,11 +479,18 @@ class BlitzPackMainWindow(tk.Tk):
 
         self.animated_buttons: List[AnimatedButton] = []
         self._active_job: bool = False
+        self._cancel_event: Optional[threading.Event] = None
         self._dragged_item_path: Optional[Path] = None
 
         self._build_ui()
         self._navigate_to_directory(self.current_dir)
         self._start_graph_heartbeat()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        if self._cancel_event:
+            self._cancel_event.set()
+        self.destroy()
 
     def _build_ui(self) -> None:
         t = THEMES[self.current_theme]
@@ -1218,6 +1225,7 @@ class BlitzPackMainWindow(tk.Tk):
 
         # Update Performance Card directly (NO POPUPS!)
         self._active_job = True
+        self._cancel_event = threading.Event()
         self.prog_bar["value"] = 0
         self.lbl_perf_op.configure(text=f"⚡ Compressing {target_to_compress.name}...")
         self.lbl_perf_ticker.configure(text=f"Level {level} • {workers} Workers")
@@ -1236,14 +1244,19 @@ class BlitzPackMainWindow(tk.Tk):
                     output_path=out_archive_path,
                     level=level,
                     workers=workers,
+                    cancel_event=self._cancel_event,
                     progress_callback=on_progress,
                 )
                 self.after(0, lambda: self._show_compress_scorecard(res))
                 self.after(0, self._action_refresh)
+            except BlitzCancelled:
+                self.after(0, lambda: self.lbl_perf_op.configure(text="⚠️ Compression Cancelled"))
+                self.after(0, lambda: self.lbl_perf_ticker.configure(text="Pipeline halted cleanly"))
             except Exception as ex:
                 self.after(0, lambda: self.lbl_perf_op.configure(text=f"❌ Error: {str(ex)[:40]}"))
             finally:
                 self._active_job = False
+                self._cancel_event = None
 
         threading.Thread(target=worker_thread, daemon=True).start()
 
@@ -1298,6 +1311,7 @@ class BlitzPackMainWindow(tk.Tk):
 
         # Update Performance Card directly (NO POPUPS!)
         self._active_job = True
+        self._cancel_event = threading.Event()
         self.prog_bar["value"] = 0
         self.lbl_perf_op.configure(text=f"📥 Extracting {archive_path.name}...")
         self.lbl_perf_ticker.configure(text=f"Destination: {dest_folder.name}")
@@ -1315,14 +1329,19 @@ class BlitzPackMainWindow(tk.Tk):
                     archive_path=archive_path,
                     output_dir=dest_folder,
                     workers=workers,
+                    cancel_event=self._cancel_event,
                     progress_callback=on_progress,
                 )
                 self.after(0, lambda: self._show_extract_scorecard(res))
                 self.after(0, self._action_refresh)
+            except BlitzCancelled:
+                self.after(0, lambda: self.lbl_perf_op.configure(text="⚠️ Extraction Cancelled"))
+                self.after(0, lambda: self.lbl_perf_ticker.configure(text="Pipeline halted cleanly"))
             except Exception as ex:
                 self.after(0, lambda: self.lbl_perf_op.configure(text=f"❌ Error: {str(ex)[:40]}"))
             finally:
                 self._active_job = False
+                self._cancel_event = None
 
         threading.Thread(target=worker_thread, daemon=True).start()
 
