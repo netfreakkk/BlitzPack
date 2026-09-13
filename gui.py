@@ -299,6 +299,10 @@ class AnimatedButton(tk.Canvas):
             if self.is_pressed or self.is_hovered:
                 return (t["accent_hover"], t["accent_glow"], t["accent_text"])
             return (t["accent"], t["card_border"], t["accent_text"])
+        elif self.btn_style == "danger":
+            if self.is_pressed or self.is_hovered:
+                return ("#DC2626", "#F87171", "#FFFFFF")
+            return ("#991B1B" if self.theme_name == "dark" else "#EF4444", "#F87171", "#FFFFFF")
         else:
             if self.is_pressed or self.is_hovered:
                 return (t["secondary_hover"], t["accent"], t["secondary_text"])
@@ -744,6 +748,13 @@ class BlitzPackMainWindow(tk.Tk):
         )
         self.lbl_perf_metrics.pack(anchor="center")
 
+        # Active Job Cancel Button (Visible dynamically during compression/extraction)
+        self.btn_cancel_job = AnimatedButton(
+            self.perf_card, text="🛑 Cancel Operation", style="danger", height=28, theme_name=self.current_theme,
+            command=self._action_cancel_job
+        )
+        self.animated_buttons.append(self.btn_cancel_job)
+
         # Card 4: Quick Action Buttons
         actions_card = ttk.Frame(right_sidebar)
         actions_card.pack(fill="x")
@@ -797,6 +808,15 @@ class BlitzPackMainWindow(tk.Tk):
         self.bind("<Delete>", lambda e: self._action_delete_async())
         self.bind("<BackSpace>", lambda e: self._action_up_directory())
         self.bind("<F5>", lambda e: self._action_refresh())
+        self.bind("<Escape>", lambda e: self._action_cancel_job())
+
+    def _action_cancel_job(self) -> None:
+        """Cooperatively halt any in-flight compression or decompression job."""
+        if self._active_job and self._cancel_event and not self._cancel_event.is_set():
+            self._cancel_event.set()
+            self.lbl_perf_op.configure(text="⏳ Cancelling...")
+            self.lbl_perf_ticker.configure(text="Halting worker pipelines cleanly...")
+            self.btn_cancel_job.pack_forget()
 
     def _draw_traffic_lights(self) -> None:
         self.traffic_canvas.delete("all")
@@ -1226,6 +1246,7 @@ class BlitzPackMainWindow(tk.Tk):
         # Update Performance Card directly (NO POPUPS!)
         self._active_job = True
         self._cancel_event = threading.Event()
+        self.btn_cancel_job.pack(fill="x", pady=(6, 0))
         self.prog_bar["value"] = 0
         self.lbl_perf_op.configure(text=f"⚡ Compressing {target_to_compress.name}...")
         self.lbl_perf_ticker.configure(text=f"Level {level} • {workers} Workers")
@@ -1257,6 +1278,7 @@ class BlitzPackMainWindow(tk.Tk):
             finally:
                 self._active_job = False
                 self._cancel_event = None
+                self.after(0, self.btn_cancel_job.pack_forget)
 
         threading.Thread(target=worker_thread, daemon=True).start()
 
@@ -1312,6 +1334,7 @@ class BlitzPackMainWindow(tk.Tk):
         # Update Performance Card directly (NO POPUPS!)
         self._active_job = True
         self._cancel_event = threading.Event()
+        self.btn_cancel_job.pack(fill="x", pady=(6, 0))
         self.prog_bar["value"] = 0
         self.lbl_perf_op.configure(text=f"📥 Extracting {archive_path.name}...")
         self.lbl_perf_ticker.configure(text=f"Destination: {dest_folder.name}")
@@ -1342,6 +1365,7 @@ class BlitzPackMainWindow(tk.Tk):
             finally:
                 self._active_job = False
                 self._cancel_event = None
+                self.after(0, self.btn_cancel_job.pack_forget)
 
         threading.Thread(target=worker_thread, daemon=True).start()
 
