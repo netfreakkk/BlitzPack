@@ -150,3 +150,149 @@ def test_permissions_restored_on_posix(tmp_path: Path):
     decompress(archive, dest)
 
     assert (dest / "script.sh").stat().st_mode & 0o777 == 0o755
+
+
+# =============================================================================
+# Security Hardening & Robustness Tests (docs/robust.md)
+# =============================================================================
+
+import struct
+from blitzpack.archive_format import BlitzArchiveWriter, ManifestEntry, FLAG_STORED
+from blitzpack.checksum import compute_digest
+
+
+def _build_archive_with_manifest_path(archive_path: Path, rel_path: str):
+    """Write a minimal valid archive whose single file claims `rel_path`."""
+    data = b"pwned"
+    with open(archive_path, "wb") as f:
+        w = BlitzArchiveWriter(f)
+        w.write_chunk(0, data, len(data), compute_digest(data), 0, FLAG_STORED)
+        w.finalize(
+            [ManifestEntry(
+                path=rel_path, size=len(data), mtime=0.0, file_type=0,
+                symlink_target=None, permissions=0o644, win_attrs=0,
+                start_chunk=0, start_offset=0, end_chunk=0, end_offset=len(data),
+            )],
+            total_original_size=len(data),
+        )
+
+
+def test_path_traversal_is_blocked(tmp_path: Path):
+    """A manifest path escaping destination via .. must be refused without writing anything."""
+    archive = tmp_path / "evil.blitz"
+    _build_archive_with_manifest_path(archive, "../escaped.txt")
+
+    dest = tmp_path / "out"
+    with pytest.raises(ArchiveFormatError, match="path traversal"):
+        decompress(archive, dest)
+
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+def test_absolute_path_is_blocked(tmp_path: Path):
+    """An absolute or drive-letter path in manifest must be blocked."""
+    archive = tmp_path / "evil2.blitz"
+    bad = "/tmp/escaped_abs.txt" if os.name != "nt" else "C:/Windows/Temp/escaped_abs.txt"
+    _build_archive_with_manifest_path(archive, bad)
+
+    dest = tmp_path / "out2"
+    with pytest.raises(ArchiveFormatError, match="path traversal"):
+        decompress(archive, dest)
+
+
+def test_absurd_seek_count_rejected(tmp_path: Path):
+    """A corrupt seek-table count must be rejected without huge allocations."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"hello")
+    archive = tmp_path / "a.blitz"
+    compress(src, archive, level=1)
+
+    with open(archive, "rb") as f:
+        off = BlitzArchiveReader(f).footer.seek_table_offset
+
+    with open(archive, "r+b") as f:
+        f.seek(off)
+        f.write(struct.pack("<I", 0xFFFFFFFF))  # claim 4 billion entries
+
+    with open(archive, "rb") as f:
+        with pytest.raises(ArchiveFormatError, match="Seek table claims"):
+            BlitzArchiveReader(f)
+
+
+def test_truncated_archive_rejected(tmp_path: Path):
+    """A file cut off mid-stream must raise a clean format error, not unhandled crash."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"x" * 5000)
+    archive = tmp_path / "a.blitz"
+    compress(src, archive, level=1)
+
+    full = archive.read_bytes()
+    (tmp_path / "cut.blitz").write_bytes(full[: len(full) // 2])
+
+    with open(tmp_path / "cut.blitz", "rb") as f:
+        with pytest.raises(ArchiveFormatError):
+            BlitzArchiveReader(f)
+
+
+# =============================================================================
+# Functional Features Tests (docs/additional_patch.md)
+# =============================================================================
+
+def test_selective_extraction(tmp_path: Path):
+    """Selective extraction must extract only matching files and skip unreferenced chunks."""
+    src = tmp_path / "src"
+    (src / "keep").mkdir(parents=True)
+    (src / "drop").mkdir()
+    (src / "keep" / "a.txt").write_text("A")
+    (src / "keep" / "b.txt").write_text("B")
+    (src / "drop" / "c.txt").write_text("C")
+
+    archive = tmp_path / "a.blitz"
+    compress(src, archive, level=1)
+
+    dest = tmp_path / "out"
+    res = decompress(archive, dest, include=["keep"])
+
+    assert (dest / "keep" / "a.txt").read_text() == "A"
+    assert (dest / "keep" / "b.txt").read_text() == "B"
+    assert not (dest / "drop").exists()
+    assert res.total_files == 2
+
+
+def test_reproducible_archive_fidelity(tmp_path: Path):
+    """Deterministic mode (-x) must produce bit-for-bit identical archives."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "z.txt").write_text("zeta")
+    (src / "a.txt").write_text("alpha")
+    (src / "m.txt").write_text("mu")
+
+    arc1 = tmp_path / "rep1.blitz"
+    arc2 = tmp_path / "rep2.blitz"
+
+    compress(src, arc1, level=1, deterministic=True)
+    compress(src, arc2, level=1, deterministic=True)
+
+    assert arc1.read_bytes() == arc2.read_bytes()
+
+
+def test_cancellation_stops_pipeline(tmp_path: Path):
+    """Setting cancel_event must raise BlitzCancelled promptly without corrupt output."""
+    import threading
+    from blitzpack.utils import BlitzCancelled
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(50):
+        (src / f"data_{i}.bin").write_bytes(os.urandom(100_000))
+
+    archive = tmp_path / "cancelled.blitz"
+    cancel = threading.Event()
+    cancel.set()  # Cancel immediately
+
+    with pytest.raises(BlitzCancelled):
+        compress(src, archive, level=1, cancel_event=cancel)
+
+    assert not archive.exists()

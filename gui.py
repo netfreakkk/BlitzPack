@@ -19,12 +19,10 @@ from __future__ import annotations
 import collections
 import ctypes
 import datetime
-import gc
 import os
 import shutil
 import sys
 import threading
-import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk

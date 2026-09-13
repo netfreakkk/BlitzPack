@@ -1,10 +1,7 @@
 """Parallel decompression engine reading seek tables and extracting chunks concurrently.
 
-Uses an optimized 3-stage pipeline:
-1. Reader Thread: Sequentially reads compressed chunk bytes from the archive.
-2. Worker Threads: Decompress chunks in parallel using zstandard and verify xxHash checksums.
-3. Writer Thread: Streams decompressed bytes to disk using pooled handles with wb+ truncation,
-   eliminating Windows NTFS file-sharing conflicts and r+b mode lock contention.
+Uses an optimized 3-stage pipeline with cooperative cancellation, path-traversal (Zip Slip)
+protection, selective random-access extraction, and non-blocking background teardown.
 """
 
 from __future__ import annotations
@@ -20,9 +17,9 @@ from typing import Any, Dict, List, Optional
 
 import zstandard as zstd
 
-from .archive_format import ArchiveFormatError, BlitzArchiveReader, SeekEntry, FLAG_STORED
+from .archive_format import ArchiveFormatError, BlitzArchiveReader, SeekEntry, FLAG_STORED, ManifestEntry
 from .checksum import compute_digest
-from .utils import ProgressCallback, ProgressUpdate, sanitize_windows_path
+from .utils import ProgressCallback, ProgressUpdate, sanitize_windows_path, BlitzCancelled
 
 
 @dataclass(slots=True)
@@ -33,6 +30,7 @@ class DecompressionResult:
     duration_seconds: float
     throughput_mb_s: float
     backend: str
+    skipped_symlinks: int = 0
 
 
 @dataclass(slots=True)
@@ -62,14 +60,18 @@ def _worker_decompress_loop(
     read_queue: queue.Queue,
     write_queue: queue.Queue,
     error_queue: queue.Queue,
+    stop_event: threading.Event,
 ) -> None:
-    """Worker: decompresses chunks and verifies checksums in parallel across CPU cores."""
+    """Worker: decompress + checksum, cooperating with stop_event for clean shutdown."""
     if not hasattr(_thread_local, "decompressor"):
         _thread_local.decompressor = zstd.ZstdDecompressor()
     decompressor = _thread_local.decompressor
 
-    while True:
-        task: Optional[ExtractTask] = read_queue.get()
+    while not stop_event.is_set():
+        try:
+            task: Optional[ExtractTask] = read_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
         if task is None:
             read_queue.task_done()
             break
@@ -78,7 +80,6 @@ def _worker_decompress_loop(
             seek_entry = task.seek_entry
             raw_bytes = task.raw_bytes
 
-            # 1. Decompress
             if seek_entry.flags & FLAG_STORED:
                 decompressed = raw_bytes
             else:
@@ -87,16 +88,20 @@ def _worker_decompress_loop(
                 )
             del raw_bytes
 
-            # 2. Checksum validation
-            actual_digest = compute_digest(decompressed)
-            if actual_digest != seek_entry.digest:
+            if compute_digest(decompressed) != seek_entry.digest:
                 raise ValueError(
-                    f"Chunk {task.chunk_index} checksum mismatch! Expected {seek_entry.digest:#x}, got {actual_digest:#x}"
+                    f"Chunk {task.chunk_index} checksum mismatch! Expected {seek_entry.digest:#x}"
                 )
 
-            write_queue.put((task, decompressed))
+            while not stop_event.is_set():
+                try:
+                    write_queue.put((task, decompressed), timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
         except Exception as ex:
             error_queue.put(ex)
+            stop_event.set()
         finally:
             read_queue.task_done()
 
@@ -106,13 +111,14 @@ def _writer_thread_loop(
     result_queue: queue.Queue,
     error_queue: queue.Queue,
     total_valid_chunks: int,
+    stop_event: threading.Event,
 ) -> None:
-    """High-throughput disk writer: streams chunks to files using pooled sequential handles."""
+    """Disk writer: streams chunks to files, honoring stop_event."""
     open_handles: Dict[str, Any] = {}
     chunks_written_per_file: Dict[str, int] = {}
     completed = 0
 
-    while completed < total_valid_chunks:
+    while completed < total_valid_chunks and not stop_event.is_set():
         if not error_queue.empty():
             break
 
@@ -147,11 +153,11 @@ def _writer_thread_loop(
                     with open(sanitized_dest, "wb") as f_out:
                         f_out.write(slice_data)
 
-            bytes_written = len(decompressed)
-            result_queue.put(bytes_written)
+            result_queue.put(len(decompressed))
             completed += 1
         except Exception as ex:
             error_queue.put(ex)
+            stop_event.set()
             break
         finally:
             del decompressed
@@ -170,15 +176,16 @@ def _reader_thread_loop(
     chunk_to_targets: Dict[int, List[ExtractTarget]],
     read_queue: queue.Queue,
     error_queue: queue.Queue,
+    stop_event: threading.Event,
 ) -> None:
-    """Reader: reads compressed chunks from the archive sequentially from disk."""
+    """Reader: reads referenced chunks in offset order, honoring stop_event."""
     sanitized_archive = sanitize_windows_path(archive_path)
     ordered_entries = sorted(enumerate(seek_entries), key=lambda x: x[1].offset)
 
     try:
         with open(sanitized_archive, "rb") as f:
             for chunk_index, seek_entry in ordered_entries:
-                if not error_queue.empty():
+                if stop_event.is_set() or not error_queue.empty():
                     break
                 targets = chunk_to_targets.get(chunk_index)
                 if not targets:
@@ -187,16 +194,42 @@ def _reader_thread_loop(
                 f.seek(seek_entry.offset)
                 raw_bytes = f.read(seek_entry.compressed_size)
 
-                read_queue.put(
-                    ExtractTask(
-                        chunk_index=chunk_index,
-                        seek_entry=seek_entry,
-                        raw_bytes=raw_bytes,
-                        targets=targets,
-                    )
+                task = ExtractTask(
+                    chunk_index=chunk_index,
+                    seek_entry=seek_entry,
+                    raw_bytes=raw_bytes,
+                    targets=targets,
                 )
+                while not stop_event.is_set():
+                    try:
+                        read_queue.put(task, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
     except Exception as ex:
         error_queue.put(ex)
+        stop_event.set()
+
+
+def _select_entries(manifest: List[ManifestEntry], include: Optional[List[str]]) -> List[ManifestEntry]:
+    """Filter manifest entries to those matching `include` (files or directory prefixes).
+
+    include=None -> everything. Paths are archive-relative, forward-slash.
+    """
+    if not include:
+        return manifest
+    norm = []
+    for i in include:
+        i = i.strip().replace("\\", "/").strip("/")
+        if i in ("", "."):
+            return manifest  # explicit root selects all
+        norm.append(i)
+    out = []
+    for e in manifest:
+        p = e.path.replace("\\", "/")
+        if any(p == inc or p.startswith(inc + "/") for inc in norm):
+            out.append(e)
+    return out
 
 
 def decompress(
@@ -205,13 +238,27 @@ def decompress(
     workers: int = 0,
     verify_first: bool = False,
     cleanup_on_error: bool = False,
+    allow_external_symlinks: bool = False,
+    include: Optional[List[str]] = None,
+    cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> DecompressionResult:
-    """Extract a .blitz archive in parallel with full directory, permission, and timestamp restoration."""
+    """Extract a .blitz archive in parallel with path traversal protection, cancellation, and selective extraction."""
     arc_p = Path(archive_path).resolve()
     out_p = Path(output_dir).resolve()
+    out_root = out_p
     num_workers = workers or os.cpu_count() or 4
     created_output_root = not out_p.exists()
+
+    def _safe_target(rel_path: str) -> Path:
+        """Resolve an archive path under out_root, refusing any escape (Zip Slip)."""
+        clean_rel = rel_path.lstrip("/\\")
+        resolved = (out_root / clean_rel).resolve()
+        if resolved != out_root and not resolved.is_relative_to(out_root):
+            raise ArchiveFormatError(
+                f"Refusing to extract outside destination (path traversal): {rel_path!r}"
+            )
+        return resolved
 
     start_time = time.perf_counter()
 
@@ -221,10 +268,14 @@ def decompress(
         if verify_first:
             reader.verify(deep=False)
 
+    selected = _select_entries(reader.manifest, include)
+    if include and not selected:
+        raise FileNotFoundError(f"No entries in archive matched: {include}")
+
     # 2. Recreate Directory Hierarchy
     seen_dirs = set()
-    for entry in reader.manifest:
-        target_path = out_p / entry.path
+    for entry in selected:
+        target_path = _safe_target(entry.path)
         sanitized_target = sanitize_windows_path(target_path)
         if entry.file_type == 1:  # Directory
             if sanitized_target not in seen_dirs:
@@ -237,7 +288,7 @@ def decompress(
                 seen_dirs.add(parent_dir)
 
             if entry.size == 0:
-                with open(sanitized_target, "wb") as f_empty:
+                with open(sanitized_target, "wb"):
                     pass
 
     # 3. Map chunk index -> targets with dynamic seek table offset accumulation
@@ -245,11 +296,11 @@ def decompress(
         i: [] for i in range(len(reader.seek_entries))
     }
 
-    for entry in reader.manifest:
+    for entry in selected:
         if entry.file_type != 0 or entry.size == 0:
             continue
 
-        target_path = out_p / entry.path
+        target_path = _safe_target(entry.path)
         if entry.start_chunk != entry.end_chunk:
             total_chunks = entry.end_chunk - entry.start_chunk + 1
             running = 0
@@ -276,6 +327,10 @@ def decompress(
                     f"Chunk span for {entry.path!r} covers {running} bytes but the manifest records {entry.size}"
                 )
         else:
+            if not 0 <= entry.start_chunk < len(reader.seek_entries):
+                raise ArchiveFormatError(
+                    f"Manifest entry {entry.path!r} references out-of-range chunk {entry.start_chunk}"
+                )
             chunk_to_targets[entry.start_chunk].append(
                 ExtractTarget(
                     target_path=target_path,
@@ -289,19 +344,20 @@ def decompress(
                 )
             )
 
-    total_bytes = reader.footer.total_original_size
+    total_bytes = sum(e.size for e in selected if e.file_type == 0)
     bytes_done = 0
     total_valid_chunks = sum(1 for v in chunk_to_targets.values() if v)
 
-    # 4. Start 3-Stage Pipeline
+    # 4. Start 3-Stage Pipeline with stop_event
     read_queue: queue.Queue = queue.Queue(maxsize=max(8, num_workers * 2))
     write_queue: queue.Queue = queue.Queue(maxsize=max(8, num_workers * 2))
     result_queue: queue.Queue = queue.Queue()
     error_queue: queue.Queue = queue.Queue()
+    stop_event = threading.Event()
 
     writer_thread = threading.Thread(
         target=_writer_thread_loop,
-        args=(write_queue, result_queue, error_queue, total_valid_chunks),
+        args=(write_queue, result_queue, error_queue, total_valid_chunks, stop_event),
         daemon=True,
     )
     writer_thread.start()
@@ -310,7 +366,7 @@ def decompress(
     for _ in range(num_workers):
         t = threading.Thread(
             target=_worker_decompress_loop,
-            args=(read_queue, write_queue, error_queue),
+            args=(read_queue, write_queue, error_queue, stop_event),
             daemon=True,
         )
         t.start()
@@ -318,7 +374,7 @@ def decompress(
 
     reader_thread = threading.Thread(
         target=_reader_thread_loop,
-        args=(arc_p, reader.seek_entries, chunk_to_targets, read_queue, error_queue),
+        args=(arc_p, reader.seek_entries, chunk_to_targets, read_queue, error_queue, stop_event),
         daemon=True,
     )
     reader_thread.start()
@@ -328,6 +384,8 @@ def decompress(
 
     try:
         while completed_chunks < total_valid_chunks:
+            if cancel_event is not None and cancel_event.is_set():
+                raise BlitzCancelled("extraction cancelled")
             if not error_queue.empty():
                 raise error_queue.get()
 
@@ -347,8 +405,8 @@ def decompress(
                 progress_callback(
                     ProgressUpdate(
                         phase="decompressing",
-                        files_processed=len(reader.manifest),
-                        total_files=len(reader.manifest),
+                        files_processed=len(selected),
+                        total_files=len(selected),
                         bytes_processed=bytes_done,
                         total_bytes=total_bytes,
                         current_speed_bps=speed,
@@ -356,10 +414,12 @@ def decompress(
                     )
                 )
     except BaseException:
+        stop_event.set()
         if cleanup_on_error and created_output_root and out_p.exists():
             shutil.rmtree(out_p, ignore_errors=True)
         raise
     finally:
+        stop_event.set()
         for _ in range(num_workers):
             try:
                 read_queue.put_nowait(None)
@@ -370,12 +430,17 @@ def decompress(
         reader_thread.join(timeout=5)
         writer_thread.join(timeout=5)
 
-    # 5. Restore Symlinks, Permissions, and Timestamps
-    for entry in reader.manifest:
-        target_path = out_p / entry.path
+    # 5. Restore Symlinks, Windows Attributes, Permissions, and Timestamps
+    skipped_symlinks = 0
+    for entry in selected:
+        target_path = _safe_target(entry.path)
         sanitized_target = sanitize_windows_path(target_path)
 
         if entry.file_type == 2 and entry.symlink_target:
+            link_dest = (target_path.parent / entry.symlink_target).resolve()
+            if not allow_external_symlinks and not link_dest.is_relative_to(out_root):
+                skipped_symlinks += 1
+                continue
             try:
                 if os.path.islink(sanitized_target) or os.path.exists(sanitized_target):
                     os.remove(sanitized_target)
@@ -388,6 +453,15 @@ def decompress(
                     os.chmod(sanitized_target, entry.permissions)
                 except OSError:
                     pass
+            elif os.name == "nt" and entry.win_attrs:
+                try:
+                    import ctypes
+                    settable = entry.win_attrs & 0x27  # READONLY | HIDDEN | SYSTEM | ARCHIVE
+                    if settable:
+                        ctypes.windll.kernel32.SetFileAttributesW(str(target_path), settable)
+                except Exception:
+                    pass
+
             if entry.mtime:
                 try:
                     os.utime(sanitized_target, (entry.mtime, entry.mtime))
@@ -399,9 +473,10 @@ def decompress(
 
     return DecompressionResult(
         output_dir=out_p,
-        total_files=len(reader.manifest),
+        total_files=len(selected),
         extracted_bytes=total_bytes,
         duration_seconds=total_duration,
         throughput_mb_s=throughput,
         backend="py-pipeline-fast",
+        skipped_symlinks=skipped_symlinks,
     )

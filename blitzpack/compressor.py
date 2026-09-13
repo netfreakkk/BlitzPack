@@ -29,7 +29,7 @@ from .archive_format import BlitzArchiveWriter, FLAG_STORED, ManifestEntry
 from .checksum import compute_digest
 from .constants import CHUNK_SIZE
 from .scheduler import CompressionJob, WorkScheduler
-from .utils import ProgressCallback, ProgressUpdate, sanitize_windows_path
+from .utils import ProgressCallback, ProgressUpdate, sanitize_windows_path, BlitzCancelled
 
 LEVEL_PROFILES: Dict[str, int] = {
     "fast": 1,
@@ -38,10 +38,11 @@ LEVEL_PROFILES: Dict[str, int] = {
     "ultra": 19,
 }
 
-# How long the writer tolerates an idle pipeline (readers finished, queues drained)
-# before declaring a stall rather than blocking forever.
-_STALL_POLLS = 50
 _POLL_TIMEOUT = 0.1
+
+def _stall_polls(chunk_size: int) -> int:
+    """Allow more idle time before declaring a stall when chunks are large."""
+    return max(50, int((chunk_size / (4 * 1024 * 1024)) * 50))
 
 
 class SourceReadError(OSError):
@@ -106,13 +107,7 @@ class SequentialReader:
                 self._path = None
 
     def read_job(self, job: CompressionJob) -> bytes:
-        """Read a job's payload, raising SourceReadError rather than returning short data.
-
-        Returning b"" on failure (as this used to) archives the file as empty *and*
-        checksums the empty payload, so extraction reports success on a corrupt archive.
-        Bundle offsets are also computed at scan time, so a file that changed size since
-        then would silently misalign every later member of its bundle.
-        """
+        """Read a job's payload, raising SourceReadError rather than returning short data."""
         if job.job_type == "chunk":
             entry = job.source_entry
             assert entry is not None, "chunk job without a source entry"
@@ -154,12 +149,7 @@ class SequentialReader:
 
 
 def _build_read_groups(ordered_jobs: List[CompressionJob]) -> List[List[CompressionJob]]:
-    """Group consecutive chunk jobs that belong to the same source file.
-
-    Each group is handled by a single reader thread with one open handle, so a large
-    multi-chunk file is streamed sequentially instead of scattered across threads.
-    Bundle jobs are always their own group.
-    """
+    """Group consecutive chunk jobs that belong to the same source file."""
     groups: List[List[CompressionJob]] = []
     current: List[CompressionJob] = []
     current_path: Optional[Path] = None
@@ -275,24 +265,34 @@ def compress(
     workers: int = 0,
     readers: int = 0,
     chunk_size: int = CHUNK_SIZE,
+    deterministic: bool = False,
+    cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> CompressionResult:
     """Compress a file or directory tree into a seekable .blitz archive."""
     in_p = Path(input_path).resolve()
     out_p = Path(output_path).resolve()
-    num_workers = workers or os.cpu_count() or 4
 
-    num_readers = readers if readers > 0 else max(2, min(8, num_workers))
+    try:
+        import psutil
+        avail_cpus = len(psutil.Process().cpu_affinity())
+    except Exception:
+        avail_cpus = os.cpu_count() or 4
+
+    num_workers = workers or avail_cpus
+    num_readers = readers if readers > 0 else (2 if avail_cpus <= 4 else min(8, avail_cpus))
     level_int = LEVEL_PROFILES.get(level.lower().strip(), 3) if isinstance(level, str) else int(level)
 
     start_time = time.perf_counter()
 
     # 1. Discovery
     manifest = FileAnalyzer(in_p).scan()
+    if deterministic:
+        manifest.entries.sort(key=lambda e: e.relative_path)
 
-    # 2. Scheduling, in directory-traversal order
+    # 2. Scheduling in directory-traversal order (redundant sorted dropped)
     scheduler = WorkScheduler(chunk_size=chunk_size, bundle_target=chunk_size)
-    ordered_jobs = sorted(scheduler.schedule(manifest), key=lambda j: j.job_id)
+    ordered_jobs = list(scheduler.schedule(manifest))
     total_jobs = len(ordered_jobs)
 
     job_chunk_index_map: Dict[int, int] = {j.job_id: i for i, j in enumerate(ordered_jobs)}
@@ -307,11 +307,12 @@ def compress(
     total_source_files = 0
 
     for entry in manifest.entries:
+        entry_mtime = 0.0 if deterministic else entry.mtime
         if entry.file_type != 0 or entry.size == 0:
             if entry.file_type == 0:
                 total_source_files += 1
             manifest_entries.append(ManifestEntry(
-                path=entry.relative_path, size=entry.size, mtime=entry.mtime,
+                path=entry.relative_path, size=entry.size, mtime=entry_mtime,
                 file_type=entry.file_type, symlink_target=entry.symlink_target,
                 permissions=entry.permissions, win_attrs=entry.win_attrs,
                 start_chunk=-1, start_offset=0, end_chunk=-1, end_offset=0,
@@ -328,7 +329,7 @@ def compress(
                     f"({entry.size} bytes)"
                 )
             manifest_entries.append(ManifestEntry(
-                path=entry.relative_path, size=entry.size, mtime=entry.mtime,
+                path=entry.relative_path, size=entry.size, mtime=entry_mtime,
                 file_type=0, symlink_target=None,
                 permissions=entry.permissions, win_attrs=entry.win_attrs,
                 start_chunk=chunks_info[0][0], start_offset=0,
@@ -340,9 +341,10 @@ def compress(
             continue
         chunk_idx = job_chunk_index_map[j.job_id]
         for member in j.bundle_members:
+            member_mtime = 0.0 if deterministic else member.entry.mtime
             manifest_entries.append(ManifestEntry(
                 path=member.entry.relative_path, size=member.size,
-                mtime=member.entry.mtime, file_type=0, symlink_target=None,
+                mtime=member_mtime, file_type=0, symlink_target=None,
                 permissions=member.entry.permissions, win_attrs=member.entry.win_attrs,
                 start_chunk=chunk_idx, start_offset=member.offset_in_bundle,
                 end_chunk=chunk_idx, end_offset=member.offset_in_bundle + member.size,
@@ -393,6 +395,8 @@ def compress(
         for _ in range(num_readers)
     ]
 
+    stall_threshold = _stall_polls(scheduler.chunk_size)
+
     try:
         for t in worker_threads:
             t.start()
@@ -408,6 +412,8 @@ def compress(
             writer = BlitzArchiveWriter(f_out, default_chunk_size=scheduler.chunk_size)
 
             while next_write_id < total_jobs:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise BlitzCancelled("compression cancelled")
                 if not error_box.empty():
                     raise error_box.get()
 
@@ -418,7 +424,7 @@ def compress(
                     readers_done = not any(t.is_alive() for t in reader_threads)
                     if readers_done and read_queue.empty() and write_queue.empty():
                         idle_polls += 1
-                        if idle_polls >= _STALL_POLLS:
+                        if idle_polls >= stall_threshold:
                             if not error_box.empty():
                                 raise error_box.get()
                             raise RuntimeError(
@@ -464,6 +470,13 @@ def compress(
                         ))
 
             writer.finalize(manifest_entries=manifest_entries, total_original_size=total_bytes)
+    except BaseException:
+        if temp_archive_path.exists():
+            try:
+                temp_archive_path.unlink()
+            except OSError:
+                pass
+        raise
     finally:
         stop_event.set()
         for _ in range(num_workers):

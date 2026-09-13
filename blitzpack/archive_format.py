@@ -1,11 +1,10 @@
 """Binary specification, writer, and reader for the BlitzPack (.blitz) seekable archive format."""
 
 from dataclasses import dataclass
-import io
 import os
 from pathlib import Path
 import struct
-from typing import BinaryIO, Dict, Generator, List, Optional
+from typing import BinaryIO, Dict, List, Optional
 import msgpack
 
 from .checksum import IncrementalHasher, compute_digest, compute_stream_digest
@@ -241,12 +240,36 @@ class BlitzArchiveReader:
             file_count=count
         )
 
+        # Sanity-bound the offsets from the (possibly hostile) footer.
+        if not (HEADER_STRUCT.size <= self.footer.seek_table_offset <= file_len - FOOTER_STRUCT.size):
+            raise ArchiveFormatError(
+                f"Seek table offset {self.footer.seek_table_offset} outside file bounds"
+            )
+        if self.footer.manifest_offset != 0 and not (
+            self.footer.seek_table_offset <= self.footer.manifest_offset <= file_len - FOOTER_STRUCT.size
+        ):
+            raise ArchiveFormatError(
+                f"Manifest offset {self.footer.manifest_offset} outside file bounds"
+            )
+
         # 3. Parse Seek Table
         self._stream.seek(self.footer.seek_table_offset)
         raw_count = self._stream.read(4)
         if len(raw_count) < 4:
             raise ArchiveFormatError("Failed to read seek table count")
         num_entries = struct.unpack("<I", raw_count)[0]
+
+        # A seek entry is fixed-size; reject counts that cannot physically fit.
+        table_region_end = (
+            self.footer.manifest_offset
+            if self.footer.manifest_offset > 0
+            else file_len - FOOTER_STRUCT.size
+        )
+        max_possible = max(0, (table_region_end - (self.footer.seek_table_offset + 4)) // SEEK_ENTRY_STRUCT.size)
+        if num_entries > max_possible:
+            raise ArchiveFormatError(
+                f"Seek table claims {num_entries} entries but only {max_possible} fit in the file"
+            )
 
         for _ in range(num_entries):
             entry_raw = self._stream.read(SEEK_ENTRY_STRUCT.size)
@@ -267,23 +290,35 @@ class BlitzArchiveReader:
             self._stream.seek(self.footer.manifest_offset)
             # Read through to the footer
             manifest_len = (file_len - FOOTER_STRUCT.size) - self.footer.manifest_offset
+            if manifest_len < 0:
+                raise ArchiveFormatError("Negative manifest length (corrupt offsets)")
             manifest_data = self._stream.read(manifest_len)
-            raw_manifest = msgpack.unpackb(manifest_data, raw=False)
+            if len(manifest_data) != manifest_len:
+                raise ArchiveFormatError("Truncated manifest region")
+            try:
+                raw_manifest = msgpack.unpackb(manifest_data, raw=False, strict_map_key=False)
+            except (ValueError, msgpack.exceptions.UnpackException) as exc:
+                raise ArchiveFormatError(f"Corrupt manifest: {exc}") from exc
+            if not isinstance(raw_manifest, list):
+                raise ArchiveFormatError("Manifest is not a list")
 
             for d in raw_manifest:
-                self.manifest.append(ManifestEntry(
-                    path=d["p"],
-                    size=d["s"],
-                    mtime=d["t"],
-                    file_type=d["y"],
-                    symlink_target=d.get("l"),
-                    permissions=d["m"],
-                    win_attrs=d["w"],
-                    start_chunk=d["sc"],
-                    start_offset=d["so"],
-                    end_chunk=d["ec"],
-                    end_offset=d["eo"],
-                ))
+                try:
+                    self.manifest.append(ManifestEntry(
+                        path=d["p"],
+                        size=d["s"],
+                        mtime=d["t"],
+                        file_type=d["y"],
+                        symlink_target=d.get("l"),
+                        permissions=d["m"],
+                        win_attrs=d["w"],
+                        start_chunk=d["sc"],
+                        start_offset=d["so"],
+                        end_chunk=d["ec"],
+                        end_offset=d["eo"],
+                    ))
+                except (KeyError, TypeError) as exc:
+                    raise ArchiveFormatError(f"Malformed manifest entry: {exc}") from exc
 
     def read_raw_chunk(self, chunk_index: int) -> tuple[SeekEntry, bytes]:
         """Read the exact compressed payload bytes for a specific chunk index."""

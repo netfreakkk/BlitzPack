@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import stat
-from typing import Dict, List, Optional, Set
+from typing import List, Optional
 from .utils import normalize_relative_path, sanitize_windows_path
 
 from .constants import CHUNK_SIZE

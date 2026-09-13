@@ -82,3 +82,7 @@ def can_preallocate_fast() -> bool:
     # On Windows, true instant pre-allocation requires SeManageVolumePrivilege (SetFileValidData).
     # Return False to let callers perform standard sequential chunk writes instead of slow zero-fill.
     return False
+
+
+class BlitzCancelled(Exception):
+    """Raised when a compression or extraction is cancelled via a cancel_event."""

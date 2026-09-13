@@ -17,8 +17,9 @@ from blitzpack import (
     compress,
     decompress,
 )
+from blitzpack.compressor import SourceReadError, LEVEL_PROFILES
 from blitzpack.scheduler import WorkScheduler
-from blitzpack.utils import ProgressUpdate, format_bytes, format_throughput
+from blitzpack.utils import ProgressUpdate, format_bytes, format_throughput, BlitzCancelled
 
 # Ensure safe rendering across all Windows legacy / UTF-8 terminals
 if sys.platform == "win32":
@@ -37,15 +38,14 @@ def handle_compress(args: argparse.Namespace) -> None:
     in_path = Path(args.input).resolve()
     if not in_path.exists():
         console.print(f"[bold red]Error:[/] Target path does not exist: {in_path}")
-        sys.exit(1)
+        sys.exit(4)
 
     out_path = Path(args.output).resolve() if args.output else in_path.with_suffix(".blitz")
     workers = args.workers or os.cpu_count() or 4
     
     raw_level = str(args.level).lower().strip()
-    profile_map = {"fast": 1, "balanced": 3, "high": 9, "ultra": 19}
-    if raw_level in profile_map:
-        level = profile_map[raw_level]
+    if raw_level in LEVEL_PROFILES:
+        level = LEVEL_PROFILES[raw_level]
         profile_name = raw_level.capitalize()
     else:
         try:
@@ -58,7 +58,8 @@ def handle_compress(args: argparse.Namespace) -> None:
     console.print(Panel(
         f"[bold cyan]Input:[/] {in_path}\n"
         f"[bold cyan]Output:[/] {out_path}\n"
-        f"[bold cyan]Threads:[/] {workers} workers  |  [bold cyan]Profile:[/] {profile_name}",
+        f"[bold cyan]Threads:[/] {workers} workers  |  [bold cyan]Profile:[/] {profile_name}"
+        + ("  |  [bold cyan]Reproducible:[/] Yes" if getattr(args, "reproducible", False) else ""),
         title="BlitzPack Compress",
         border_style="cyan"
     ))
@@ -88,6 +89,8 @@ def handle_compress(args: argparse.Namespace) -> None:
             output_path=out_path,
             level=level,
             workers=workers,
+            readers=getattr(args, "readers", 0),
+            deterministic=getattr(args, "reproducible", False),
             progress_callback=on_progress
         )
 
@@ -107,7 +110,7 @@ def handle_decompress(args: argparse.Namespace) -> None:
     arc_path = Path(args.archive).resolve()
     if not arc_path.is_file():
         console.print(f"[bold red]Error:[/] Archive file does not exist: {arc_path}")
-        sys.exit(1)
+        sys.exit(4)
 
     out_dir = Path(args.output).resolve() if args.output else arc_path.with_suffix("")
     workers = args.workers or os.cpu_count() or 4
@@ -147,8 +150,8 @@ def handle_decompress(args: argparse.Namespace) -> None:
         )
 
     console.print(Panel(
-        f"[bold green]Archive successfully extracted![/]\n\n"
-        f"Files Extracted:  {res.total_files}\n"
+        f"[bold green]Extraction Complete![/]\n\n"
+        f"Extracted Files:  {res.total_files}\n"
         f"Total Size:       {format_bytes(res.extracted_bytes)}\n"
         f"Throughput:       [bold]{res.throughput_mb_s:.1f} MB/s[/]\n"
         f"Duration:         {res.duration_seconds:.2f}s",
@@ -157,41 +160,85 @@ def handle_decompress(args: argparse.Namespace) -> None:
     ))
 
 
+def handle_extract(args: argparse.Namespace) -> None:
+    """Selective random-access extraction."""
+    arc_path = Path(args.archive).resolve()
+    if not arc_path.is_file():
+        console.print(f"[bold red]Error:[/] Archive file does not exist: {arc_path}")
+        sys.exit(4)
+
+    out_dir = Path(args.output).resolve() if args.output else arc_path.with_suffix("")
+    workers = args.workers or os.cpu_count() or 4
+
+    console.print(Panel(
+        f"[bold cyan]Archive:[/] {arc_path}\n"
+        f"[bold cyan]Extracting:[/] {', '.join(args.paths)}\n"
+        f"[bold cyan]Destination:[/] {out_dir}",
+        title="BlitzPack Extract (Selective)",
+        border_style="cyan",
+    ))
+
+    res = decompress(
+        archive_path=arc_path,
+        output_dir=out_dir,
+        workers=workers,
+        include=args.paths,
+    )
+
+    console.print(Panel(
+        f"[bold green]Extracted {res.total_files} entr{'y' if res.total_files == 1 else 'ies'}.[/]\n"
+        f"Total Size:  {format_bytes(res.extracted_bytes)}\n"
+        f"Duration:    {res.duration_seconds:.2f}s",
+        title="Extraction Complete",
+        border_style="green",
+    ))
+
+
 def handle_list(args: argparse.Namespace) -> None:
     arc_path = Path(args.archive).resolve()
     if not arc_path.is_file():
-        console.print(f"[bold red]Error:[/] File does not exist: {arc_path}")
-        sys.exit(1)
+        console.print(f"[bold red]Error:[/] Archive file does not exist: {arc_path}")
+        sys.exit(4)
 
     with open(arc_path, "rb") as f:
         reader = BlitzArchiveReader(f)
 
-    table = Table(title=f"Archive Contents: {arc_path.name}", show_lines=False)
-    table.add_column("Type", style="cyan", width=8)
-    table.add_column("Size", justify="right", width=12)
-    table.add_column("Modified", width=20)
-    table.add_column("Path", style="bold")
+        table = Table(title=f"Archive: {arc_path.name}", show_lines=True)
+        table.add_column("Type", justify="center", style="cyan")
+        table.add_column("Path", style="magenta")
+        table.add_column("Size", justify="right")
+        table.add_column("Chunks", justify="center")
 
-    type_names = {0: "File", 1: "Dir", 2: "Symlink"}
+        type_names = {0: "File", 1: "Dir", 2: "Link"}
 
-    for entry in reader.manifest:
-        mtime_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.mtime))
-        table.add_row(
-            type_names.get(entry.file_type, "Unknown"),
-            format_bytes(entry.size) if entry.file_type == 0 else "-",
-            mtime_str,
-            entry.path + (" -> " + entry.symlink_target if entry.symlink_target else "")
+        for entry in reader.manifest:
+            type_str = type_names.get(entry.file_type, "?")
+            chunk_span = (
+                "-" if entry.start_chunk == -1 else (
+                    str(entry.start_chunk) if entry.start_chunk == entry.end_chunk
+                    else f"{entry.start_chunk}..{entry.end_chunk}"
+                )
+            )
+            table.add_row(
+                type_str,
+                entry.path,
+                format_bytes(entry.size) if entry.file_type == 0 else "-",
+                chunk_span
+            )
+
+        console.print(table)
+        console.print(
+            f"\nTotal: [bold cyan]{len(reader.manifest)}[/] entries, "
+            f"[bold cyan]{format_bytes(reader.footer.total_original_size)}[/] uncompressed in "
+            f"[bold cyan]{len(reader.seek_entries)}[/] chunks.\n"
         )
-
-    console.print(table)
-    console.print(f"\n[dim]Total: {len(reader.manifest)} entries, {format_bytes(reader.footer.total_original_size)} uncompressed, {len(reader.seek_entries)} seekable chunks[/]\n")
 
 
 def handle_analyze(args: argparse.Namespace) -> None:
     in_path = Path(args.input).resolve()
     if not in_path.exists():
         console.print(f"[bold red]Error:[/] Target path does not exist: {in_path}")
-        sys.exit(1)
+        sys.exit(4)
 
     analyzer = FileAnalyzer(in_path)
     manifest = analyzer.scan()
@@ -238,7 +285,7 @@ def handle_verify(args: argparse.Namespace) -> None:
     arc_path = Path(args.archive).resolve()
     if not arc_path.is_file():
         console.print(f"[bold red]Error:[/] Archive file does not exist: {arc_path}")
-        sys.exit(1)
+        sys.exit(4)
 
     mode = "deep (every chunk decompressed)" if args.deep else "fast (whole-archive digest)"
     console.print(Panel(
@@ -285,8 +332,8 @@ def handle_verify(args: argparse.Namespace) -> None:
         border_style="green",
     ))
 
+
 def main() -> None:
-    # If launched with no arguments (e.g. user double-clicked the .exe in Windows Explorer):
     if len(sys.argv) == 1:
         try:
             from gui import main as gui_main
@@ -310,14 +357,25 @@ def main() -> None:
     p_comp.add_argument("-l", "--level", default="balanced", help="Compression profile: fast, balanced (default), high, ultra")
     p_comp.add_argument("-w", "--workers", type=int, default=0, help="CPU worker count (default: all cores)")
     p_comp.add_argument("-r", "--readers", type=int, default=0, help="Disk reader threads (default: auto; use 1-2 for spinning disks)")
+    p_comp.add_argument("-x", "--reproducible", action="store_true", help="Generate deterministic byte-for-byte identical archives")
     p_comp.set_defaults(func=handle_compress)
 
-    # Decompress
-    p_decomp = subparsers.add_parser("decompress", help="Extract a .blitz archive")
+    # Decompress (Extract All)
+    p_decomp = subparsers.add_parser("decompress", help="Extract all files from a .blitz archive")
     p_decomp.add_argument("archive", help="Path to .blitz archive")
     p_decomp.add_argument("-o", "--output", help="Target extraction directory")
     p_decomp.add_argument("-w", "--workers", type=int, default=0, help="CPU worker count (default: all cores)")
     p_decomp.set_defaults(func=handle_decompress)
+
+    # Extract (Selective Random Access)
+    p_extract = subparsers.add_parser(
+        "extract", help="Extract only specific files or folders (random access)"
+    )
+    p_extract.add_argument("archive", help="Path to .blitz archive")
+    p_extract.add_argument("paths", nargs="+", help="Archive-relative path(s) to extract")
+    p_extract.add_argument("-o", "--output", help="Target extraction directory")
+    p_extract.add_argument("-w", "--workers", type=int, default=0, help="CPU worker count")
+    p_extract.set_defaults(func=handle_extract)
 
     # List
     p_list = subparsers.add_parser("list", help="List archive entries")
@@ -342,7 +400,26 @@ def main() -> None:
     p_analyze.set_defaults(func=handle_analyze)
 
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except BlitzCancelled:
+        console.print("[yellow]Cancelled.[/]")
+        sys.exit(130)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/]")
+        sys.exit(130)
+    except ArchiveFormatError as exc:
+        console.print(f"[bold red]Archive error:[/] {exc}")
+        sys.exit(2)
+    except SourceReadError as exc:
+        console.print(f"[bold red]Read error:[/] {exc}")
+        sys.exit(3)
+    except FileNotFoundError as exc:
+        console.print(f"[bold red]Not found:[/] {exc}")
+        sys.exit(4)
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/] {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
