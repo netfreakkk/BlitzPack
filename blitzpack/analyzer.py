@@ -7,7 +7,7 @@ import stat
 from typing import List, Optional
 from .utils import normalize_relative_path, sanitize_windows_path
 
-from .constants import CHUNK_SIZE
+from .constants import CHUNK_SIZE, INLINE_MAX_SIZE, MAX_PRELOAD_BUDGET
 
 # A file is chunked if the scheduler will split it, and bundled otherwise.
 CHUNKED_THRESHOLD = CHUNK_SIZE
@@ -24,6 +24,7 @@ class FileEntry:
     permissions: int = 0o644
     win_attrs: int = 0
     extension: str = ""
+    preloaded_bytes: Optional[bytes] = None
 
 
 @dataclass(slots=True)

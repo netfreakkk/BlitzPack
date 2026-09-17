@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import queue
 import threading
@@ -27,7 +28,7 @@ import zstandard as zstd
 from .analyzer import FileAnalyzer
 from .archive_format import BlitzArchiveWriter, FLAG_STORED, ManifestEntry
 from .checksum import compute_digest
-from .constants import CHUNK_SIZE
+from .constants import CHUNK_SIZE, IO_WORKERS
 from .scheduler import CompressionJob, WorkScheduler
 from .utils import ProgressCallback, ProgressUpdate, sanitize_windows_path, BlitzCancelled
 
@@ -85,11 +86,12 @@ class JobResult:
 class SequentialReader:
     """Reads job payloads, holding one file handle open across a group of chunks."""
 
-    __slots__ = ("_path", "_fh")
+    __slots__ = ("_path", "_fh", "_io_pool")
 
-    def __init__(self) -> None:
+    def __init__(self, io_pool: Optional[ThreadPoolExecutor] = None) -> None:
         self._path: Optional[str] = None
         self._fh = None
+        self._io_pool = io_pool
 
     def _open(self, path: str) -> None:
         if self._path == path:
@@ -128,8 +130,23 @@ class SequentialReader:
 
         if job.job_type == "bundle":
             self.close()
-            parts: List[bytes] = []
-            for member in job.bundle_members:
+            members = job.bundle_members
+            if not members:
+                return b""
+
+            # Fast path: all members already inlined in memory during discovery
+            if all(m.entry.preloaded_bytes is not None for m in members):
+                parts: List[bytes] = []
+                for m in members:
+                    parts.append(m.entry.preloaded_bytes)
+                    m.entry.preloaded_bytes = None  # Immediately free preloaded RAM
+                return b"".join(parts)
+
+            def _read_member(member) -> bytes:
+                if member.entry.preloaded_bytes is not None:
+                    data = member.entry.preloaded_bytes
+                    member.entry.preloaded_bytes = None  # Free preloaded RAM
+                    return data
                 path = sanitize_windows_path(member.entry.path)
                 try:
                     with open(path, "rb") as f:
@@ -142,7 +159,13 @@ class SequentialReader:
                         f"size changed during compression: scheduled {member.size} bytes, "
                         f"read {len(data)}",
                     )
-                parts.append(data)
+                return data
+
+            if self._io_pool is not None and len(members) > 4:
+                parts = list(self._io_pool.map(_read_member, members))
+            else:
+                parts = [_read_member(m) for m in members]
+
             return b"".join(parts)
 
         raise ValueError(f"Unknown job type: {job.job_type!r}")
@@ -191,9 +214,10 @@ def _reader_thread_func(
     read_queue: queue.Queue,
     error_box: queue.Queue,
     stop_event: threading.Event,
+    io_pool: Optional[ThreadPoolExecutor] = None,
 ) -> None:
     """Producer: reads one group at a time with a single handle."""
-    reader = SequentialReader()
+    reader = SequentialReader(io_pool=io_pool)
     try:
         while not stop_event.is_set():
             try:
@@ -378,6 +402,8 @@ def compress(
     for _ in range(num_readers):
         read_groups.put(None)
 
+    io_pool = ThreadPoolExecutor(max_workers=IO_WORKERS)
+
     worker_threads = [
         threading.Thread(
             target=_worker_loop,
@@ -389,7 +415,7 @@ def compress(
     reader_threads = [
         threading.Thread(
             target=_reader_thread_func,
-            args=(read_groups, read_queue, error_box, stop_event),
+            args=(read_groups, read_queue, error_box, stop_event, io_pool),
             daemon=True,
         )
         for _ in range(num_readers)
@@ -481,6 +507,10 @@ def compress(
         raise
     finally:
         stop_event.set()
+        try:
+            io_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
         for _ in range(num_workers):
             try:
                 read_queue.put_nowait(None)
