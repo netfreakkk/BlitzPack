@@ -57,3 +57,4 @@ blitzpack_benchmark_prompt.md
 # Antigravity agent artifacts
 .gemini/
 benchmark.py
+scratch/
