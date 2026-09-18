@@ -20,26 +20,48 @@ import collections
 import ctypes
 import datetime
 import os
+from pathlib import Path
 import shutil
 import sys
 import threading
 import tkinter as tk
-from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import psutil
 import sv_ttk
 
-if sys.stdout and hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if sys.stderr and hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
 from blitzpack.archive_format import BlitzArchiveReader
 from blitzpack.compressor import CompressionResult, compress
 from blitzpack.decompressor import DecompressionResult, decompress
 from blitzpack.utils import BlitzCancelled, ProgressUpdate, format_bytes, sanitize_windows_path
+
+# Enable Windows Per-Monitor High-DPI Awareness (V2) for crisp rendering
+if sys.platform == "win32":
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+GWLP_WNDPROC = -4
+WM_DROPFILES = 0x0233
+LRESULT = ctypes.c_longlong
+HWND = ctypes.c_void_p
+UINT = ctypes.c_uint
+WPARAM = ctypes.c_void_p
+LPARAM = ctypes.c_void_p
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 # -----------------------------------------------------------------------------
@@ -139,15 +161,16 @@ def get_dynamic_cpu_tiers() -> Dict[str, int]:
         }
 
 
-def apply_windows_mica(window: tk.Tk, dark: bool = True) -> None:
-    """Enable native Windows 11 DWM Mica translucent backdrop."""
+def apply_windows_dark_titlebar(window: tk.Tk, dark: bool = True) -> None:
+    """Set native Windows title bar dark/light mode attribute cleanly without backdrop blur glitches."""
+    if sys.platform != "win32":
+        return
     try:
         window.update_idletasks()
-        hwnd = ctypes.windll.user32.GetAncestor(window.winfo_id(), 2)
+        hwnd = ctypes.windll.user32.GetAncestor(window.winfo_id(), 2) or window.winfo_id()
         dark_val = ctypes.c_int(1 if dark else 0)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark_val), ctypes.sizeof(dark_val))
-        mica_val = ctypes.c_int(2)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(mica_val), ctypes.sizeof(mica_val))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(dark_val), ctypes.sizeof(dark_val))
     except Exception:
         pass
 
@@ -179,10 +202,10 @@ def get_file_icon_and_badge(name: str, is_dir: bool) -> Tuple[str, str]:
 
 
 # -----------------------------------------------------------------------------
-# macOS Smooth Sliding Toggle Switch
+# Smooth Sliding Theme Toggle Switch
 # -----------------------------------------------------------------------------
-class MacOSSwitch(tk.Canvas):
-    """Smooth sliding iOS/macOS toggle switch with sun/moon icon."""
+class ThemeToggleSwitch(tk.Canvas):
+    """Smooth sliding animated toggle switch with sun/moon icon."""
 
     def __init__(
         self,
@@ -246,11 +269,14 @@ class MacOSSwitch(tk.Canvas):
         self.create_text(kx, 14, text=glyph, font=("Segoe UI", 7))
 
 
+MacOSSwitch = ThemeToggleSwitch
+
+
 # -----------------------------------------------------------------------------
 # Animated Hover Pill Button
 # -----------------------------------------------------------------------------
 class AnimatedButton(tk.Canvas):
-    """Modern macOS rounded pill button with smooth hover highlights and click feedback."""
+    """Modern rounded pill button with smooth hover highlights and click feedback."""
 
     def __init__(
         self,
@@ -261,6 +287,7 @@ class AnimatedButton(tk.Canvas):
         height: int = 34,
         theme_name: str = "dark",
         font: Tuple[str, int, str] = ("Segoe UI Variable Text", 9, "bold"),
+        bg_parent: str = "",
     ) -> None:
         super().__init__(parent, height=height, highlightthickness=0, bd=0)
         self.text = text
@@ -269,6 +296,7 @@ class AnimatedButton(tk.Canvas):
         self.btn_height = height
         self.theme_name = theme_name
         self.btn_font = font
+        self.bg_parent = bg_parent
         self.is_hovered = False
         self.is_pressed = False
         self.width = 120
@@ -279,9 +307,12 @@ class AnimatedButton(tk.Canvas):
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
 
-    def set_theme(self, theme_name: str) -> None:
+    def set_theme(self, theme_name: str, bg_parent: str = "") -> None:
         self.theme_name = theme_name
-        self.configure(bg=THEMES[theme_name]["card_bg"])
+        if bg_parent:
+            self.bg_parent = bg_parent
+        bg_canvas = self.bg_parent if self.bg_parent else THEMES[self.theme_name]["card_bg"]
+        self.configure(bg=bg_canvas)
         self._redraw()
 
     def set_text(self, text: str) -> None:
@@ -318,9 +349,10 @@ class AnimatedButton(tk.Canvas):
     def _redraw(self) -> None:
         self.delete("all")
         bg_fill, border_color, text_color = self._get_colors()
-        self.configure(bg=THEMES[self.theme_name]["card_bg"])
+        bg_canvas = self.bg_parent if self.bg_parent else THEMES[self.theme_name]["card_bg"]
+        self.configure(bg=bg_canvas)
         padding = 2 if not self.is_pressed else 3
-        r = 10
+        r = 8
         self._draw_rounded_rect(
             padding, padding, max(padding + 10, self.width - padding), self.btn_height - padding,
             r, bg_fill, border_color
@@ -450,7 +482,7 @@ class TaskManagerLiveGraph(tk.Canvas):
 # Main Application Window
 # -----------------------------------------------------------------------------
 class BlitzPackMainWindow(tk.Tk):
-    """Modern macOS-Inspired Fluent Desktop Archiver & File Manager."""
+    """Modern Windows Fluent Desktop Archiver & File Manager."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -461,8 +493,6 @@ class BlitzPackMainWindow(tk.Tk):
 
         # Default theme
         self.current_theme = "dark"
-        sv_ttk.set_theme(self.current_theme)
-        apply_windows_mica(self, dark=True)
 
         # State
         self.mode: str = "filesystem"
@@ -484,8 +514,13 @@ class BlitzPackMainWindow(tk.Tk):
         self._active_job: bool = False
         self._cancel_event: Optional[threading.Event] = None
         self._dragged_item_path: Optional[Path] = None
+        self._hwnd: Optional[int] = None
+        self._old_wndproc: Optional[int] = None
+        self._wndproc_ref: Any = None
 
         self._build_ui()
+        self._apply_theme_styling(is_dark=True)
+        self._setup_native_drag_and_drop()
         self._navigate_to_directory(self.current_dir)
         self._start_graph_heartbeat()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -493,7 +528,164 @@ class BlitzPackMainWindow(tk.Tk):
     def _on_close(self) -> None:
         if self._cancel_event:
             self._cancel_event.set()
+        self._cleanup_native_drag_and_drop()
         self.destroy()
+
+    def _setup_native_drag_and_drop(self) -> None:
+        """Register native Windows WM_DROPFILES hook to accept files/folders dragged from Explorer."""
+        if sys.platform != "win32":
+            return
+        try:
+            self.update_idletasks()
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+
+            hwnd = user32.GetAncestor(self.winfo_id(), 2) or self.winfo_id()
+            if not hwnd:
+                return
+            self._hwnd = hwnd
+
+            user32.CallWindowProcW.argtypes = [ctypes.c_void_p, HWND, UINT, WPARAM, LPARAM]
+            user32.CallWindowProcW.restype = LRESULT
+            user32.GetWindowLongPtrW.argtypes = [HWND, ctypes.c_int]
+            user32.GetWindowLongPtrW.restype = ctypes.c_void_p
+            user32.SetWindowLongPtrW.argtypes = [HWND, ctypes.c_int, ctypes.c_void_p]
+            user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+            shell32.DragAcceptFiles.argtypes = [HWND, ctypes.c_bool]
+            shell32.DragAcceptFiles.restype = None
+            shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+            shell32.DragQueryFileW.restype = ctypes.c_uint
+            shell32.DragFinish.argtypes = [ctypes.c_void_p]
+            shell32.DragFinish.restype = None
+
+            self._old_wndproc = user32.GetWindowLongPtrW(self._hwnd, GWLP_WNDPROC)
+
+            def py_wndproc(hwnd_val: Any, msg: int, wparam: Any, lparam: Any) -> int:
+                if msg == WM_DROPFILES:
+                    hdrop = wparam
+                    try:
+                        count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+                        dropped_paths = []
+                        for i in range(count):
+                            buf = ctypes.create_unicode_buffer(1024)
+                            shell32.DragQueryFileW(hdrop, i, buf, 1024)
+                            if buf.value:
+                                dropped_paths.append(buf.value)
+                        shell32.DragFinish(hdrop)
+                        if dropped_paths:
+                            self.after(0, lambda p=dropped_paths: self._on_external_drop(p))
+                    except Exception:
+                        pass
+                    return 0
+                return user32.CallWindowProcW(self._old_wndproc, hwnd_val, msg, wparam, lparam)
+
+            self._wndproc_ref = WNDPROC(py_wndproc)
+            user32.SetWindowLongPtrW(self._hwnd, GWLP_WNDPROC, ctypes.cast(self._wndproc_ref, ctypes.c_void_p))
+            shell32.DragAcceptFiles(self._hwnd, True)
+        except Exception:
+            pass
+
+    def _cleanup_native_drag_and_drop(self) -> None:
+        """Restore original window procedure cleanly to avoid crashes on shutdown."""
+        if sys.platform != "win32":
+            return
+        if self._old_wndproc and self._hwnd:
+            try:
+                ctypes.windll.user32.SetWindowLongPtrW(self._hwnd, GWLP_WNDPROC, self._old_wndproc)
+            except Exception:
+                pass
+            self._old_wndproc = None
+
+    def _on_external_drop(self, paths: List[str]) -> None:
+        """Handle files or folders dragged from an external Windows File Explorer window."""
+        if not paths:
+            return
+        valid_paths = [Path(p) for p in paths if os.path.exists(p)]
+        if not valid_paths:
+            return
+
+        # If single .blitz archive dropped, open or inspect it
+        if len(valid_paths) == 1 and valid_paths[0].is_file() and valid_paths[0].suffix.lower() == ".blitz":
+            self._open_archive(valid_paths[0])
+            return
+
+        # If dropped target is a directory or file, add to archive
+        self._action_add_to_archive(specific_target=valid_paths[0])
+
+    def _apply_theme_styling(self, is_dark: bool) -> None:
+        """Apply unified theme styling to all ttk widgets, canvases, and windows title bar."""
+        self.current_theme = "dark" if is_dark else "light"
+        sv_ttk.set_theme(self.current_theme)
+        apply_windows_dark_titlebar(self, dark=is_dark)
+
+        t = THEMES[self.current_theme]
+        self.configure(bg=t["bg"])
+
+        style = ttk.Style(self)
+        style.configure("TFrame", background=t["bg"])
+        style.configure("TLabel", background=t["bg"], foreground=t["text_primary"])
+        style.configure("TLabelframe", background=t["card_bg"], bordercolor=t["card_border"])
+        style.configure("TLabelframe.Label", background=t["card_bg"], foreground=t["text_primary"], font=("Segoe UI Variable Display", 9, "bold"))
+
+        style.configure(
+            "Treeview",
+            background=t["card_bg"],
+            foreground=t["text_primary"],
+            fieldbackground=t["card_bg"],
+            rowheight=28,
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", t["accent"])],
+            foreground=[("selected", t["accent_text"])],
+        )
+        style.configure("Treeview.Heading", font=("Segoe UI Variable Display", 9, "bold"))
+
+        if hasattr(self, "lbl_logo"):
+            self.lbl_logo.configure(foreground=t["accent"], background=t["bg"])
+        if hasattr(self, "lbl_badge"):
+            self.lbl_badge.configure(background=t["card_border"], foreground=t["text_secondary"])
+        if hasattr(self, "lbl_status_mode"):
+            self.lbl_status_mode.configure(foreground=t["accent"], background=t["bg"])
+        if hasattr(self, "theme_switch"):
+            self.theme_switch.set_state(is_dark, bg_parent=t["bg"])
+        if hasattr(self, "lbl_drop_title"):
+            self.lbl_drop_title.configure(background=t["card_bg"], foreground=t["text_primary"])
+        if hasattr(self, "lbl_drop_sub"):
+            self.lbl_drop_sub.configure(background=t["card_bg"], foreground=t["text_secondary"])
+        if hasattr(self, "lbl_drop_icon"):
+            self.lbl_drop_icon.configure(background=t["card_bg"], foreground=t["accent"])
+        if hasattr(self, "lbl_perf_op"):
+            self.lbl_perf_op.configure(background=t["card_bg"], foreground=t["text_primary"])
+        if hasattr(self, "lbl_perf_ticker"):
+            self.lbl_perf_ticker.configure(background=t["card_bg"], foreground=t["text_secondary"])
+        if hasattr(self, "lbl_perf_metrics"):
+            self.lbl_perf_metrics.configure(background=t["card_bg"], foreground=t["text_secondary"])
+        if hasattr(self, "lbl_status_items"):
+            self.lbl_status_items.configure(background=t["bg"], foreground=t["text_primary"])
+        if hasattr(self, "lbl_status_selected"):
+            self.lbl_status_selected.configure(background=t["bg"], foreground=t["text_secondary"])
+        if hasattr(self, "lbl_path_mode"):
+            self.lbl_path_mode.configure(background=t["bg"], foreground=t["text_primary"])
+
+        # Update animated buttons with parent card background
+        if hasattr(self, "btn_choose_folder"):
+            self.btn_choose_folder.set_theme(self.current_theme, bg_parent=t["card_bg"])
+        if hasattr(self, "btn_choose_arc"):
+            self.btn_choose_arc.set_theme(self.current_theme, bg_parent=t["card_bg"])
+        if hasattr(self, "btn_cancel_job"):
+            self.btn_cancel_job.set_theme(self.current_theme, bg_parent=t["card_bg"])
+        if hasattr(self, "btn_side_extract"):
+            self.btn_side_extract.set_theme(self.current_theme, bg_parent=t["bg"])
+        if hasattr(self, "btn_side_test"):
+            self.btn_side_test.set_theme(self.current_theme, bg_parent=t["bg"])
+
+        if hasattr(self, "live_graph"):
+            self.live_graph.set_theme(self.current_theme)
+
+    def _on_switch_toggled(self, is_dark: bool) -> None:
+        self._apply_theme_styling(is_dark)
 
     def _build_ui(self) -> None:
         t = THEMES[self.current_theme]
@@ -527,18 +719,12 @@ class BlitzPackMainWindow(tk.Tk):
         self.root_container.pack(fill="both", expand=True)
 
         # ---------------------------------------------------------------------
-        # 1. macOS Header Bar (Traffic Lights, Brand Logo, Search, Sliding Switch)
+        # 1. Header Bar (Brand Logo, Live Search, Sliding Theme Toggle)
         # ---------------------------------------------------------------------
-        top_bar = ttk.Frame(self.root_container, padding=(14, 8, 14, 6))
+        top_bar = ttk.Frame(self.root_container, padding=(14, 10, 14, 8))
         top_bar.pack(fill="x")
 
-        # macOS Traffic Lights Accent
-        traffic_frame = tk.Canvas(top_bar, width=54, height=16, bg=t["bg"], highlightthickness=0, bd=0)
-        traffic_frame.pack(side="left", padx=(0, 10))
-        self.traffic_canvas = traffic_frame
-        self._draw_traffic_lights()
-
-        # Brand Badge
+        # Brand Badge (Cleanly left-aligned with zero fake traffic lights)
         brand_frame = ttk.Frame(top_bar)
         brand_frame.pack(side="left")
         self.lbl_logo = ttk.Label(
@@ -548,18 +734,19 @@ class BlitzPackMainWindow(tk.Tk):
         self.lbl_badge = ttk.Label(
             brand_frame, text=" v1.0 ", font=("Segoe UI", 8), background=t["card_border"], foreground=t["text_secondary"]
         )
-        self.lbl_badge.pack(side="left", padx=(6, 0))
+        self.lbl_badge.pack(side="left", padx=(8, 0))
 
-        # Right side: macOS Sliding Toggle Switch
+        # Right side: Theme Toggle Switch
         switch_frame = ttk.Frame(top_bar)
         switch_frame.pack(side="right", padx=(8, 0))
-        self.macos_switch = MacOSSwitch(
+        self.theme_switch = ThemeToggleSwitch(
             switch_frame,
             is_dark=(self.current_theme == "dark"),
             command=self._on_switch_toggled,
             bg_parent=t["bg"]
         )
-        self.macos_switch.pack(side="right")
+        self.theme_switch.pack(side="right")
+        self.macos_switch = self.theme_switch  # Backward-compatible alias
 
         # Live Search Filter
         search_box = ttk.Frame(top_bar)
@@ -601,7 +788,24 @@ class BlitzPackMainWindow(tk.Tk):
         self.btn_refresh.pack(side="left")
 
         # ---------------------------------------------------------------------
-        # 3. 70/30 Split Layout
+        # 3. Status Bar (Pack side="bottom" first to guarantee no scrollbar overlap)
+        # ---------------------------------------------------------------------
+        statusbar = ttk.Frame(self.root_container, padding=(14, 4, 14, 6))
+        statusbar.pack(fill="x", side="bottom")
+
+        self.lbl_status_items = ttk.Label(statusbar, text="0 items", font=("Segoe UI", 9))
+        self.lbl_status_items.pack(side="left")
+
+        self.lbl_status_selected = ttk.Label(statusbar, text="", font=("Segoe UI", 9), foreground="gray")
+        self.lbl_status_selected.pack(side="left", padx=20)
+
+        self.lbl_status_mode = ttk.Label(
+            statusbar, text="[Filesystem Mode]", font=("Segoe UI", 9, "bold"), foreground=t["accent"]
+        )
+        self.lbl_status_mode.pack(side="right")
+
+        # ---------------------------------------------------------------------
+        # 4. Main Split View (70% Table, 30% Decluttered Sidebar)
         # ---------------------------------------------------------------------
         paned = ttk.PanedWindow(self.root_container, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=14, pady=(0, 6))
@@ -658,71 +862,82 @@ class BlitzPackMainWindow(tk.Tk):
         self.context_menu.add_command(label="Delete", command=self._action_delete_async)
         self.tree.bind("<Button-3>", self._show_context_menu)
 
-        # RIGHT PANE (30%): Hero Dropzone, Profiles, and All-in-One Performance Card
+        # RIGHT PANE (30%): Decluttered Sidebar
         right_sidebar = ttk.Frame(paned, padding=(8, 0, 0, 0))
         paned.add(right_sidebar, weight=3)
 
-        # Card 1: Hero Dropzone Card
-        self.drop_card = ttk.LabelFrame(right_sidebar, text="⚡ Quick Dropzone", padding=10)
+        # Card 1: Sleek Dropzone Card
+        self.drop_card = ttk.LabelFrame(right_sidebar, text="⚡ Quick Dropzone", padding=(10, 8, 10, 10))
         self.drop_card.pack(fill="x", pady=(0, 8))
 
-        self.lbl_drop_icon = ttk.Label(self.drop_card, text="⚡", font=("Segoe UI", 24))
+        self.lbl_drop_icon = ttk.Label(self.drop_card, text="⚡", font=("Segoe UI", 20))
         self.lbl_drop_icon.pack(anchor="center")
-        self.lbl_drop_title = ttk.Label(self.drop_card, text="Drag & Drop Target Here", font=("Segoe UI Variable Display", 11, "bold"))
+        self.lbl_drop_title = ttk.Label(self.drop_card, text="Drag & Drop Files or Folders Here", font=("Segoe UI Variable Display", 10, "bold"))
         self.lbl_drop_title.pack(anchor="center", pady=(1, 1))
         self.lbl_drop_sub = ttk.Label(
             self.drop_card,
-            text="Drag files from left or click buttons below to process instantly.",
+            text="Drop from Explorer or left pane to instantly compress or open.",
             font=("Segoe UI", 8),
             foreground="gray",
             wraplength=230,
             justify="center"
         )
-        self.lbl_drop_sub.pack(anchor="center", pady=(0, 8))
+        self.lbl_drop_sub.pack(anchor="center", pady=(0, 6))
 
         btn_box = ttk.Frame(self.drop_card)
         btn_box.pack(fill="x")
         self.btn_choose_folder = AnimatedButton(
-            btn_box, text="📁 Choose Folder", style="primary", height=30, theme_name=self.current_theme,
-            command=self._action_add_to_archive
+            btn_box, text="➕ Add to Archive", style="primary", height=32, theme_name=self.current_theme,
+            command=self._action_add_to_archive, bg_parent=t["card_bg"]
         )
         self.btn_choose_folder.pack(side="left", fill="x", expand=True, padx=(0, 3))
         self.animated_buttons.append(self.btn_choose_folder)
 
         self.btn_choose_arc = AnimatedButton(
-            btn_box, text="📦 Open Archive", style="secondary", height=30, theme_name=self.current_theme,
-            command=self._action_open_archive_dialog
+            btn_box, text="📦 Open Archive", style="secondary", height=32, theme_name=self.current_theme,
+            command=self._action_open_archive_dialog, bg_parent=t["card_bg"]
         )
         self.btn_choose_arc.pack(side="right", fill="x", expand=True, padx=(3, 0))
         self.animated_buttons.append(self.btn_choose_arc)
 
-        # Card 2: Configuration & Dynamic Hardware Engine Profile
-        self.conf_card = ttk.LabelFrame(right_sidebar, text="⚙️ Profile & CPU Usage", padding=8)
+        # Card 2: Streamlined 2-Column Settings
+        self.conf_card = ttk.LabelFrame(right_sidebar, text="⚙️ Compression Settings", padding=(8, 6, 8, 8))
         self.conf_card.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(self.conf_card, text="Compression Profile:", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 2))
+        settings_grid = ttk.Frame(self.conf_card)
+        settings_grid.pack(fill="x")
+        settings_grid.columnconfigure(0, weight=1)
+        settings_grid.columnconfigure(1, weight=1)
+
+        # Col 0: Profile
+        col0 = ttk.Frame(settings_grid)
+        col0.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        ttk.Label(col0, text="Profile:", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 2))
         self.cmb_sidebar_profile = ttk.Combobox(
-            self.conf_card, values=list(LEVEL_PROFILES.keys()), state="readonly", font=("Segoe UI", 9)
+            col0, values=list(LEVEL_PROFILES.keys()), state="readonly", font=("Segoe UI", 9)
         )
         self.cmb_sidebar_profile.set("Balanced")
-        self.cmb_sidebar_profile.pack(fill="x", pady=(0, 6))
+        self.cmb_sidebar_profile.pack(fill="x")
 
-        ttk.Label(self.conf_card, text="CPU Usage Tier:", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 2))
+        # Col 1: Hardware Cores
+        col1 = ttk.Frame(settings_grid)
+        col1.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        ttk.Label(col1, text="Hardware Cores:", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 2))
         self.cpu_tiers = get_dynamic_cpu_tiers()
         self.cmb_sidebar_hw = ttk.Combobox(
-            self.conf_card, values=list(self.cpu_tiers.keys()), state="readonly", font=("Segoe UI", 9)
+            col1, values=list(self.cpu_tiers.keys()), state="readonly", font=("Segoe UI", 9)
         )
         default_tier = list(self.cpu_tiers.keys())[1]
         self.cmb_sidebar_hw.set(default_tier)
         self.cmb_sidebar_hw.pack(fill="x")
 
-        # Card 3: Embedded All-in-One Performance & Status Card (NO POPUP WINDOWS!)
-        self.perf_card = ttk.LabelFrame(right_sidebar, text="📈 Live Performance & Activity", padding=10)
+        # Card 3: Embedded Live Performance & Activity Card
+        self.perf_card = ttk.LabelFrame(right_sidebar, text="📈 Live Activity", padding=(10, 8, 10, 8))
         self.perf_card.pack(fill="x", pady=(0, 8))
 
         # Operation Title / Status
         self.lbl_perf_op = ttk.Label(
-            self.perf_card, text="Engine Ready • Standing By", font=("Segoe UI Variable Display", 10, "bold")
+            self.perf_card, text="Engine Ready • Standing By", font=("Segoe UI Variable Display", 9, "bold")
         )
         self.lbl_perf_op.pack(anchor="w")
 
@@ -736,8 +951,8 @@ class BlitzPackMainWindow(tk.Tk):
         )
         self.lbl_perf_ticker.pack(anchor="w", pady=(0, 4))
 
-        # Live Task Manager Area Graph
-        self.live_graph = TaskManagerLiveGraph(self.perf_card, height=105, theme_name=self.current_theme)
+        # Live Task Manager Area Graph (85px compact)
+        self.live_graph = TaskManagerLiveGraph(self.perf_card, height=85, theme_name=self.current_theme)
         self.live_graph.pack(fill="x", pady=(0, 4))
 
         # Scorecard / Metric Line
@@ -750,53 +965,27 @@ class BlitzPackMainWindow(tk.Tk):
         # Active Job Cancel Button (Visible dynamically during compression/extraction)
         self.btn_cancel_job = AnimatedButton(
             self.perf_card, text="🛑 Cancel Operation", style="danger", height=28, theme_name=self.current_theme,
-            command=self._action_cancel_job
+            command=self._action_cancel_job, bg_parent=t["card_bg"]
         )
         self.animated_buttons.append(self.btn_cancel_job)
 
-        # Card 4: Quick Action Buttons
-        actions_card = ttk.Frame(right_sidebar)
-        actions_card.pack(fill="x")
+        # Card 4: Quick Action Buttons (Extract & Test in a single row)
+        actions_row = ttk.Frame(right_sidebar)
+        actions_row.pack(fill="x")
 
-        self.btn_side_compress = AnimatedButton(
-            actions_card, text="⚡ Compress Selected", style="primary", height=34, theme_name=self.current_theme,
-            command=self._action_add_to_archive
-        )
-        self.btn_side_compress.pack(fill="x", pady=(0, 4))
-        self.animated_buttons.append(self.btn_side_compress)
-
-        btn_row = ttk.Frame(actions_card)
-        btn_row.pack(fill="x")
         self.btn_side_extract = AnimatedButton(
-            btn_row, text="📥 Extract To...", style="secondary", height=30, theme_name=self.current_theme,
-            command=self._action_extract_to
+            actions_row, text="📥 Extract Selected...", style="secondary", height=32, theme_name=self.current_theme,
+            command=self._action_extract_to, bg_parent=t["bg"]
         )
         self.btn_side_extract.pack(side="left", fill="x", expand=True, padx=(0, 3))
         self.animated_buttons.append(self.btn_side_extract)
 
         self.btn_side_test = AnimatedButton(
-            btn_row, text="🛡️ Test Integrity", style="secondary", height=30, theme_name=self.current_theme,
-            command=self._action_test_archive
+            actions_row, text="🛡️ Test Integrity", style="secondary", height=32, theme_name=self.current_theme,
+            command=self._action_test_archive, bg_parent=t["bg"]
         )
         self.btn_side_test.pack(side="right", fill="x", expand=True, padx=(3, 0))
         self.animated_buttons.append(self.btn_side_test)
-
-        # ---------------------------------------------------------------------
-        # 4. Status Bar
-        # ---------------------------------------------------------------------
-        statusbar = ttk.Frame(self.root_container, padding=(14, 4, 14, 6))
-        statusbar.pack(fill="x", side="bottom")
-
-        self.lbl_status_items = ttk.Label(statusbar, text="0 items", font=("Segoe UI", 9))
-        self.lbl_status_items.pack(side="left")
-
-        self.lbl_status_selected = ttk.Label(statusbar, text="", font=("Segoe UI", 9), foreground="gray")
-        self.lbl_status_selected.pack(side="left", padx=20)
-
-        self.lbl_status_mode = ttk.Label(
-            statusbar, text="[Filesystem Mode]", font=("Segoe UI", 9, "bold"), foreground=t["accent"]
-        )
-        self.lbl_status_mode.pack(side="right")
 
         # Global Shortcuts
         self.bind("<Control-o>", lambda e: self._action_open_archive_dialog())
@@ -816,33 +1005,6 @@ class BlitzPackMainWindow(tk.Tk):
             self.lbl_perf_op.configure(text="⏳ Cancelling...")
             self.lbl_perf_ticker.configure(text="Halting worker pipelines cleanly...")
             self.btn_cancel_job.pack_forget()
-
-    def _draw_traffic_lights(self) -> None:
-        self.traffic_canvas.delete("all")
-        self.traffic_canvas.configure(bg=THEMES[self.current_theme]["bg"])
-        dots = [
-            (8, 8, "#FF5F56", "#E0443E"),
-            (24, 8, "#FFBD2E", "#DEA123"),
-            (40, 8, "#27C93F", "#1AAB29"),
-        ]
-        for x, y, fill, outline in dots:
-            self.traffic_canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=fill, outline=outline, width=1)
-
-    def _on_switch_toggled(self, is_dark: bool) -> None:
-        self.current_theme = "dark" if is_dark else "light"
-        sv_ttk.set_theme(self.current_theme)
-        apply_windows_mica(self, dark=is_dark)
-
-        t = THEMES[self.current_theme]
-        self.configure(bg=t["bg"])
-        self.lbl_logo.configure(foreground=t["accent"])
-        self.lbl_status_mode.configure(foreground=t["accent"])
-        self.macos_switch.set_state(is_dark, bg_parent=t["bg"])
-        self._draw_traffic_lights()
-
-        for btn in self.animated_buttons:
-            btn.set_theme(self.current_theme)
-        self.live_graph.set_theme(self.current_theme)
 
     def _start_graph_heartbeat(self) -> None:
         if not self._active_job:
