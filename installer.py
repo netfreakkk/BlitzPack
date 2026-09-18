@@ -34,6 +34,83 @@ DEFAULT_INSTALL_DIR = os.path.join(
     APP_NAME,
 )
 
+MIT_LICENSE_TEXT = """MIT License
+
+Copyright (c) 2026 BlitzPack Team
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE."""
+
+
+def get_desktop_dir() -> str:
+    """Resolve the real, active Windows Desktop directory (including OneDrive-redirected Desktops)."""
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8)
+            ]
+        FOLDERID_Desktop = GUID(0xB4BFCC3A, 0xDB2C, 0x424C, (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41))
+        path_ptr = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(FOLDERID_Desktop), 0, None, ctypes.byref(path_ptr)) == 0:
+            if path_ptr.value and os.path.exists(path_ptr.value):
+                return path_ptr.value
+    except Exception:
+        pass
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
+            val, _ = winreg.QueryValueEx(key, "Desktop")
+            expanded = os.path.expandvars(val)
+            if os.path.exists(expanded):
+                return expanded
+    except Exception:
+        pass
+
+    desktop = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+    if not os.path.exists(desktop):
+        od = os.path.join(os.environ.get("USERPROFILE", ""), "OneDrive", "Desktop")
+        if os.path.exists(od):
+            return od
+    return desktop
+
+
+def get_start_menu_dir() -> str:
+    """Resolve the active Windows Start Menu Programs directory."""
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8)
+            ]
+        FOLDERID_Programs = GUID(0xA77F5D77, 0x2E2B, 0x44C3, (ctypes.c_ubyte * 8)(0xA6, 0xA2, 0xAB, 0xA6, 0x01, 0x05, 0x4A, 0x51))
+        path_ptr = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(FOLDERID_Programs), 0, None, ctypes.byref(path_ptr)) == 0:
+            if path_ptr.value and os.path.exists(path_ptr.value):
+                return path_ptr.value
+    except Exception:
+        pass
+    return os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs")
+
 
 def get_payload_path(filename: str) -> str:
     """Resolve path to bundled payload file."""
@@ -47,8 +124,13 @@ def get_payload_path(filename: str) -> str:
     return os.path.join(base, filename)
 
 
-def create_shortcut(target: str, shortcut_path: str, description: str = ""):
+def create_shortcut(target: str, shortcut_path: str, description: str = "") -> bool:
     """Create a Windows .lnk shortcut using WScript.Shell or PowerShell."""
+    try:
+        os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
+    except Exception:
+        pass
+
     try:
         import win32com.client
         shell = win32com.client.Dispatch("WScript.Shell")
@@ -114,7 +196,7 @@ def apply_defender_exclusion(directory: str) -> bool:
         return False
 
 
-def register_uninstaller(install_dir: str):
+def register_uninstaller(install_dir: str) -> None:
     """Register BlitzPack in Windows Add/Remove Programs registry."""
     try:
         uninstall_key = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_NAME}"
@@ -128,8 +210,8 @@ def register_uninstaller(install_dir: str):
             uninstall_bat = os.path.join(install_dir, "uninstall.bat")
             winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstall_bat}"')
 
-        desktop_lnk = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop", f"{APP_NAME}.lnk")
-        start_lnk = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs", f"{APP_NAME}.lnk")
+        desktop_lnk = os.path.join(get_desktop_dir(), f"{APP_NAME}.lnk")
+        start_lnk = os.path.join(get_start_menu_dir(), f"{APP_NAME}.lnk")
 
         bat_content = f"""@echo off
 title Uninstalling {APP_NAME}...
@@ -157,10 +239,10 @@ def perform_installation(
 ) -> tuple[bool, str]:
     """Execute full installation workflow."""
     try:
-        def log(msg, pct):
+        def log(msg: str, pct: int) -> None:
             if progress_callback:
                 progress_callback(msg, pct)
-            time.sleep(0.05)
+            time.sleep(0.08)
 
         log("Preparing installation directory...", 10)
         os.makedirs(target_dir, exist_ok=True)
@@ -178,26 +260,26 @@ def perform_installation(
             shutil.copy2(gui_src, gui_dst)
 
         if create_desktop_shortcut:
-            log("Creating Desktop shortcut...", 60)
-            desktop_dir = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
-            if os.path.exists(desktop_dir) and os.path.exists(gui_dst):
+            log("Creating Desktop shortcut...", 65)
+            desktop_dir = get_desktop_dir()
+            if os.path.exists(gui_dst):
                 create_shortcut(gui_dst, os.path.join(desktop_dir, f"{APP_NAME}.lnk"), "BlitzPack High-Speed Archiver")
 
         if create_start_menu:
-            log("Creating Start Menu entry...", 70)
-            start_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs")
-            if os.path.exists(start_dir) and os.path.exists(gui_dst):
+            log("Creating Start Menu entry...", 75)
+            start_dir = get_start_menu_dir()
+            if os.path.exists(gui_dst):
                 create_shortcut(gui_dst, os.path.join(start_dir, f"{APP_NAME}.lnk"), "BlitzPack High-Speed Archiver")
 
         if add_path:
-            log("Registering CLI in User PATH...", 80)
+            log("Registering CLI in User PATH...", 85)
             add_to_user_path(target_dir)
 
         if add_defender:
-            log("Configuring Windows Defender exclusion (Max Speed)...", 90)
+            log("Configuring Windows Defender exclusion (Max Speed)...", 92)
             apply_defender_exclusion(target_dir)
 
-        log("Registering uninstaller...", 95)
+        log("Registering uninstaller...", 96)
         register_uninstaller(target_dir)
 
         log("Installation Complete!", 100)
@@ -207,111 +289,252 @@ def perform_installation(
 
 
 class InstallerGUI:
-    def __init__(self, root: tk.Tk):
+    """Traditional multi-step wizard installer for BlitzPack."""
+
+    def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("BlitzPack Setup")
-        self.root.geometry("560x440")
+        self.root.title(f"{APP_NAME} Setup Wizard")
+        self.root.geometry("620x490")
+        self.root.minsize(620, 490)
         self.root.resizable(False, False)
 
         if HAS_SV_TTK:
             sv_ttk.set_theme("dark")
 
+        # Installation settings
         self.target_dir_var = tk.StringVar(value=DEFAULT_INSTALL_DIR)
+        self.license_agree_var = tk.StringVar(value="agree")
         self.desktop_var = tk.BooleanVar(value=True)
         self.start_menu_var = tk.BooleanVar(value=True)
         self.path_var = tk.BooleanVar(value=True)
         self.defender_var = tk.BooleanVar(value=True)
         self.launch_after_var = tk.BooleanVar(value=True)
 
-        self.setup_ui()
+        self.current_step = 0
+        self.steps = ["license", "options", "ready", "installing", "finished"]
 
-    def setup_ui(self):
-        # Header banner
-        header = ttk.Frame(self.root, padding="20 15 20 10")
-        header.pack(fill=tk.X)
+        self._build_shell()
+        self._show_step(0)
 
-        title = ttk.Label(header, text="⚡ BlitzPack Setup", font=("Segoe UI", 18, "bold"))
-        title.pack(anchor=tk.W)
+    def _build_shell(self) -> None:
+        self.header_frame = ttk.Frame(self.root, padding=(24, 16, 24, 12))
+        self.header_frame.pack(fill=tk.X)
 
-        subtitle = ttk.Label(
-            header,
-            text="Intelligent, High-Throughput Parallel Archiver (GUI and CLI)",
-            font=("Segoe UI", 9),
-            foreground="#888888"
+        self.lbl_header_title = ttk.Label(
+            self.header_frame, text="", font=("Segoe UI Variable Display", 13, "bold")
         )
-        subtitle.pack(anchor=tk.W, pady=(2, 0))
+        self.lbl_header_title.pack(anchor=tk.W)
 
-        ttk.Separator(self.root).pack(fill=tk.X, padx=20, pady=5)
+        self.lbl_header_sub = ttk.Label(
+            self.header_frame, text="", font=("Segoe UI", 9), foreground="#94A3B8"
+        )
+        self.lbl_header_sub.pack(anchor=tk.W, pady=(2, 0))
 
-        # Content frame
-        self.content_frame = ttk.Frame(self.root, padding="20 10 20 15")
-        self.content_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Separator(self.root).pack(fill=tk.X, padx=20)
 
-        # Destination selector
-        dest_label = ttk.Label(self.content_frame, text="Installation Directory:", font=("Segoe UI", 10, "bold"))
-        dest_label.pack(anchor=tk.W, pady=(0, 5))
+        self.content_container = ttk.Frame(self.root, padding=(24, 16, 24, 16))
+        self.content_container.pack(fill=tk.BOTH, expand=True)
 
-        dest_row = ttk.Frame(self.content_frame)
-        dest_row.pack(fill=tk.X, pady=(0, 15))
+        ttk.Separator(self.root).pack(fill=tk.X, padx=20)
 
-        dest_entry = ttk.Entry(dest_row, textvariable=self.target_dir_var, font=("Segoe UI", 9))
-        dest_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.nav_frame = ttk.Frame(self.root, padding=(24, 12, 24, 16))
+        self.nav_frame.pack(fill=tk.X)
 
-        browse_btn = ttk.Button(dest_row, text="Browse...", command=self.browse_dir)
-        browse_btn.pack(side=tk.RIGHT)
+        self.btn_cancel = ttk.Button(self.nav_frame, text="Cancel", width=10, command=self._on_cancel)
+        self.btn_cancel.pack(side=tk.RIGHT, padx=(8, 0))
 
-        # Options
-        opts_label = ttk.Label(self.content_frame, text="Setup Options:", font=("Segoe UI", 10, "bold"))
-        opts_label.pack(anchor=tk.W, pady=(0, 6))
+        self.btn_next = ttk.Button(self.nav_frame, text="Next >", width=12, style="Accent.TButton" if HAS_SV_TTK else "TButton", command=self._on_next)
+        self.btn_next.pack(side=tk.RIGHT, padx=(8, 0))
 
-        ttk.Checkbutton(self.content_frame, text="Create Desktop Shortcut for GUI", variable=self.desktop_var).pack(anchor=tk.W, pady=2)
-        ttk.Checkbutton(self.content_frame, text="Create Start Menu Entry", variable=self.start_menu_var).pack(anchor=tk.W, pady=2)
-        ttk.Checkbutton(self.content_frame, text="Add BlitzPack CLI to user PATH (run 'blitzpack' anywhere)", variable=self.path_var).pack(anchor=tk.W, pady=2)
+        self.btn_back = ttk.Button(self.nav_frame, text="< Back", width=10, command=self._on_back)
+        self.btn_back.pack(side=tk.RIGHT)
 
-        def_box = ttk.Frame(self.content_frame)
-        def_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+    def _clear_content(self) -> None:
+        for w in self.content_container.winfo_children():
+            w.destroy()
+
+    def _show_step(self, step_index: int) -> None:
+        self.current_step = step_index
+        self._clear_content()
+
+        step_name = self.steps[step_index]
+
+        if step_name == "license":
+            self._render_license_page()
+        elif step_name == "options":
+            self._render_options_page()
+        elif step_name == "ready":
+            self._render_ready_page()
+        elif step_name == "installing":
+            self._render_installing_page()
+        elif step_name == "finished":
+            self._render_finished_page()
+
+    def _render_license_page(self) -> None:
+        self.lbl_header_title.configure(text="⚡ License Agreement")
+        self.lbl_header_sub.configure(text="Please review the license terms before installing BlitzPack.")
+
+        ttk.Label(
+            self.content_container,
+            text="If you accept the terms of the agreement, select the option below to continue.",
+            font=("Segoe UI", 9),
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        text_frame = ttk.Frame(self.content_container)
+        text_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        txt_license = tk.Text(
+            text_frame,
+            wrap=tk.WORD,
+            font=("Consolas", 9),
+            height=9,
+            bg="#0D1726",
+            fg="#E2E8F0",
+            relief="solid",
+            bd=1,
+            highlightthickness=0,
+        )
+        scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=txt_license.yview)
+        txt_license.configure(yscrollcommand=scroll.set)
+        txt_license.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        txt_license.insert(tk.END, MIT_LICENSE_TEXT)
+        txt_license.configure(state=tk.DISABLED)
+
+        radio_box = ttk.Frame(self.content_container)
+        radio_box.pack(fill=tk.X)
+
+        rb_agree = ttk.Radiobutton(
+            radio_box,
+            text="I accept the agreement",
+            variable=self.license_agree_var,
+            value="agree",
+            command=self._update_nav_buttons,
+        )
+        rb_agree.pack(anchor=tk.W, pady=(2, 2))
+
+        rb_disagree = ttk.Radiobutton(
+            radio_box,
+            text="I do not accept the agreement",
+            variable=self.license_agree_var,
+            value="disagree",
+            command=self._update_nav_buttons,
+        )
+        rb_disagree.pack(anchor=tk.W)
+
+        self.btn_back.configure(state=tk.DISABLED)
+        self.btn_next.configure(text="Next >", state=tk.NORMAL if self.license_agree_var.get() == "agree" else tk.DISABLED)
+        self.btn_cancel.configure(state=tk.NORMAL)
+
+    def _render_options_page(self) -> None:
+        self.lbl_header_title.configure(text="📁 Destination Location & Setup Options")
+        self.lbl_header_sub.configure(text="Select where BlitzPack will be installed and which shortcuts to create.")
+
+        ttk.Label(self.content_container, text="Installation Directory:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 4))
+
+        dest_box = ttk.Frame(self.content_container)
+        dest_box.pack(fill=tk.X, pady=(0, 14))
+
+        ent_dest = ttk.Entry(dest_box, textvariable=self.target_dir_var, font=("Segoe UI", 9))
+        ent_dest.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        btn_browse = ttk.Button(dest_box, text="Browse...", command=self._browse_directory)
+        btn_browse.pack(side=tk.RIGHT)
+
+        ttk.Label(self.content_container, text="Additional Tasks:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 6))
+
         ttk.Checkbutton(
-            def_box,
-            text="Configure Windows Defender exclusion (Unlocks full 20s NVMe speed)",
-            variable=self.defender_var
-        ).pack(anchor=tk.W)
+            self.content_container,
+            text="Create a Desktop shortcut (Places BlitzPack on your active Desktop)",
+            variable=self.desktop_var,
+        ).pack(anchor=tk.W, pady=2)
 
-        # Progress / Status frame (hidden initially)
-        self.prog_frame = ttk.Frame(self.content_frame)
-        self.prog_bar = ttk.Progressbar(self.prog_frame, orient=tk.HORIZONTAL, mode="determinate")
-        self.prog_bar.pack(fill=tk.X, pady=(10, 4))
-        self.status_label = ttk.Label(self.prog_frame, text="", font=("Segoe UI", 9))
-        self.status_label.pack(anchor=tk.W)
+        ttk.Checkbutton(
+            self.content_container,
+            text="Create a Start Menu program shortcut",
+            variable=self.start_menu_var,
+        ).pack(anchor=tk.W, pady=2)
 
-        # Action bar at bottom
-        ttk.Separator(self.root).pack(fill=tk.X, padx=20, pady=(0, 10))
-        self.btn_frame = ttk.Frame(self.root, padding="20 0 20 15")
-        self.btn_frame.pack(fill=tk.X)
+        ttk.Checkbutton(
+            self.content_container,
+            text="Add BlitzPack CLI to user PATH (enables 'blitzpack' in any terminal)",
+            variable=self.path_var,
+        ).pack(anchor=tk.W, pady=2)
 
-        self.cancel_btn = ttk.Button(self.btn_frame, text="Cancel", command=self.root.quit)
-        self.cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Checkbutton(
+            self.content_container,
+            text="Configure Windows Defender exclusion (Recommended for max NVMe speed)",
+            variable=self.defender_var,
+        ).pack(anchor=tk.W, pady=2)
 
-        self.install_btn = ttk.Button(self.btn_frame, text="Install Now", style="Accent.TButton" if HAS_SV_TTK else "TButton", command=self.start_install)
-        self.install_btn.pack(side=tk.RIGHT)
+        self.btn_back.configure(state=tk.NORMAL)
+        self.btn_next.configure(text="Next >", state=tk.NORMAL)
+        self.btn_cancel.configure(state=tk.NORMAL)
 
-    def browse_dir(self):
-        chosen = filedialog.askdirectory(initialdir=self.target_dir_var.get())
-        if chosen:
-            self.target_dir_var.set(os.path.join(chosen, APP_NAME))
+    def _render_ready_page(self) -> None:
+        self.lbl_header_title.configure(text="⚡ Ready to Install")
+        self.lbl_header_sub.configure(text="Setup is ready to begin installing BlitzPack on your computer.")
 
-    def start_install(self):
-        self.install_btn.config(state=tk.DISABLED)
-        self.cancel_btn.config(state=tk.DISABLED)
-        self.prog_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(
+            self.content_container,
+            text="Click Install to proceed with the following configuration:",
+            font=("Segoe UI", 9),
+        ).pack(anchor=tk.W, pady=(0, 8))
 
-        thread = threading.Thread(target=self._run_install_thread, daemon=True)
-        thread.start()
+        summary_frame = ttk.Frame(self.content_container, padding=10)
+        summary_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
-    def _run_install_thread(self):
+        lines = [
+            f"• Install Destination:\n   {self.target_dir_var.get()}",
+            "• Shortcuts to Create:" + (" Desktop" if self.desktop_var.get() else "") + (" Start Menu" if self.start_menu_var.get() else ""),
+            "• System PATH Registration: " + ("Enabled" if self.path_var.get() else "Disabled"),
+            "• Windows Defender Exclusion: " + ("Enabled (Max Turbo)" if self.defender_var.get() else "Disabled"),
+        ]
+        lbl_summary = ttk.Label(
+            summary_frame,
+            text="\n\n".join(lines),
+            font=("Segoe UI", 9),
+            justify=tk.LEFT,
+        )
+        lbl_summary.pack(anchor=tk.W)
+
+        self.btn_back.configure(state=tk.NORMAL)
+        self.btn_next.configure(text="Install", state=tk.NORMAL)
+        self.btn_cancel.configure(state=tk.NORMAL)
+
+    def _render_installing_page(self) -> None:
+        self.lbl_header_title.configure(text="⏳ Installing BlitzPack...")
+        self.lbl_header_sub.configure(text="Please wait while Setup copies files and applies system settings.")
+
+        ttk.Label(
+            self.content_container,
+            text="Extracting binaries, registering shortcuts, and optimizing NVMe throughput...",
+            font=("Segoe UI", 9),
+        ).pack(anchor=tk.W, pady=(20, 10))
+
+        self.prog_bar = ttk.Progressbar(self.content_container, mode="determinate")
+        self.prog_bar.pack(fill=tk.X, pady=(0, 8))
+
+        self.lbl_install_status = ttk.Label(
+            self.content_container,
+            text="Starting setup pipeline...",
+            font=("Segoe UI", 9),
+            foreground="#94A3B8",
+        )
+        self.lbl_install_status.pack(anchor=tk.W)
+
+        self.btn_back.configure(state=tk.DISABLED)
+        self.btn_next.configure(state=tk.DISABLED)
+        self.btn_cancel.configure(state=tk.DISABLED)
+
+        threading.Thread(target=self._run_install_worker, daemon=True).start()
+
+    def _run_install_worker(self) -> None:
         target = self.target_dir_var.get().strip()
 
-        def update_prog(msg, pct):
-            self.root.after(0, lambda: self._update_ui_progress(msg, pct))
+        def on_prog(msg: str, pct: int) -> None:
+            self.root.after(0, lambda: self._update_install_progress(msg, pct))
 
         success, err = perform_installation(
             target_dir=target,
@@ -319,47 +542,87 @@ class InstallerGUI:
             create_start_menu=self.start_menu_var.get(),
             add_path=self.path_var.get(),
             add_defender=self.defender_var.get(),
-            progress_callback=update_prog,
+            progress_callback=on_prog,
         )
 
-        self.root.after(0, lambda: self._on_install_finished(success, err, target))
+        self.root.after(0, lambda: self._on_install_done(success, err))
 
-    def _update_ui_progress(self, msg, pct):
-        self.prog_bar["value"] = pct
-        self.status_label.config(text=msg)
+    def _update_install_progress(self, msg: str, pct: int) -> None:
+        if hasattr(self, "prog_bar"):
+            self.prog_bar["value"] = pct
+        if hasattr(self, "lbl_install_status"):
+            self.lbl_install_status.configure(text=msg)
 
-    def _on_install_finished(self, success: bool, err: str, target: str):
+    def _on_install_done(self, success: bool, err: str) -> None:
         if success:
-            # Show completed screen
-            for child in self.content_frame.winfo_children():
-                child.destroy()
-
-            success_title = ttk.Label(
-                self.content_frame,
-                text="🎉 Installation Successful!",
-                font=("Segoe UI", 14, "bold"),
-                foreground="#4CAF50"
-            )
-            success_title.pack(anchor=tk.W, pady=(10, 10))
-
-            info_text = (
-                f"BlitzPack has been installed to:\n{target}\n\n"
-                f"• Desktop shortcut created\n"
-                f"• CLI available in terminal ('blitzpack --help')\n"
-                f"• Defender optimized for maximum SSD throughput\n"
-            )
-            ttk.Label(self.content_frame, text=info_text, font=("Segoe UI", 9)).pack(anchor=tk.W, pady=(0, 15))
-
-            ttk.Checkbutton(self.content_frame, text="Launch BlitzPack GUI now", variable=self.launch_after_var).pack(anchor=tk.W)
-
-            self.install_btn.destroy()
-            self.cancel_btn.config(text="Finish", state=tk.NORMAL, command=self._finish_and_launch)
+            self._show_step(4)
         else:
-            messagebox.showerror("Installation Failed", f"An error occurred during installation:\n\n{err}")
-            self.install_btn.config(state=tk.NORMAL)
-            self.cancel_btn.config(state=tk.NORMAL)
+            messagebox.showerror("Installation Error", f"Installation failed:\n\n{err}")
+            self.btn_back.configure(state=tk.NORMAL)
+            self.btn_cancel.configure(state=tk.NORMAL)
 
-    def _finish_and_launch(self):
+    def _render_finished_page(self) -> None:
+        self.lbl_header_title.configure(text="🎉 Completing the BlitzPack Setup Wizard")
+        self.lbl_header_sub.configure(text="BlitzPack has been successfully installed on your computer.")
+
+        ttk.Label(
+            self.content_container,
+            text="Setup has finished installing BlitzPack on your system.\n"
+                 "The application may be launched using the created shortcuts.",
+            font=("Segoe UI", 10),
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(15, 20))
+
+        ttk.Checkbutton(
+            self.content_container,
+            text="Launch BlitzPack GUI now",
+            variable=self.launch_after_var,
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        desktop_dir = get_desktop_dir()
+        ttk.Label(
+            self.content_container,
+            text=f"✓ Desktop shortcut created at:\n   {desktop_dir}\\{APP_NAME}.lnk",
+            font=("Segoe UI", 8),
+            foreground="#38BDF8",
+        ).pack(anchor=tk.W)
+
+        self.btn_back.pack_forget()
+        self.btn_cancel.pack_forget()
+        self.btn_next.configure(text="Finish", state=tk.NORMAL, command=self._on_finish)
+
+    def _update_nav_buttons(self) -> None:
+        if self.steps[self.current_step] == "license":
+            is_agreed = self.license_agree_var.get() == "agree"
+            self.btn_next.configure(state=tk.NORMAL if is_agreed else tk.DISABLED)
+
+    def _browse_directory(self) -> None:
+        chosen = filedialog.askdirectory(initialdir=self.target_dir_var.get())
+        if chosen:
+            self.target_dir_var.set(os.path.join(chosen, APP_NAME))
+
+    def _on_next(self) -> None:
+        if self.current_step == 0:
+            if self.license_agree_var.get() != "agree":
+                return
+            self._show_step(1)
+        elif self.current_step == 1:
+            if not self.target_dir_var.get().strip():
+                messagebox.showwarning("Directory Required", "Please specify an installation directory.")
+                return
+            self._show_step(2)
+        elif self.current_step == 2:
+            self._show_step(3)
+
+    def _on_back(self) -> None:
+        if self.current_step > 0:
+            self._show_step(self.current_step - 1)
+
+    def _on_cancel(self) -> None:
+        if messagebox.askyesno("Exit Setup", "Are you sure you want to cancel the BlitzPack installation?"):
+            self.root.quit()
+
+    def _on_finish(self) -> None:
         target = self.target_dir_var.get().strip()
         if self.launch_after_var.get():
             gui_exe = os.path.join(target, "blitzpack-gui.exe")
@@ -368,7 +631,7 @@ class InstallerGUI:
         self.root.quit()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="BlitzPack Windows Installer")
     parser.add_argument("-s", "--silent", action="store_true", help="Run installation silently without UI")
     parser.add_argument("-d", "--dir", default=DEFAULT_INSTALL_DIR, help="Custom installation directory")

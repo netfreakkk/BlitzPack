@@ -175,6 +175,42 @@ def apply_windows_dark_titlebar(window: tk.Tk, dark: bool = True) -> None:
         pass
 
 
+def get_desktop_dir() -> str:
+    """Resolve the real, active Windows Desktop directory (including OneDrive-redirected Desktops)."""
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8)
+            ]
+        FOLDERID_Desktop = GUID(0xB4BFCC3A, 0xDB2C, 0x424C, (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41))
+        path_ptr = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(FOLDERID_Desktop), 0, None, ctypes.byref(path_ptr)) == 0:
+            if path_ptr.value and os.path.exists(path_ptr.value):
+                return path_ptr.value
+    except Exception:
+        pass
+
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
+            val, _ = winreg.QueryValueEx(key, "Desktop")
+            expanded = os.path.expandvars(val)
+            if os.path.exists(expanded):
+                return expanded
+    except Exception:
+        pass
+
+    desktop = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+    if not os.path.exists(desktop):
+        od = os.path.join(os.environ.get("USERPROFILE", ""), "OneDrive", "Desktop")
+        if os.path.exists(od):
+            return od
+    return desktop
+
+
 def get_file_icon_and_badge(name: str, is_dir: bool) -> Tuple[str, str]:
     """Return a modern glyph icon and human-friendly badge for the file type."""
     if is_dir:
@@ -202,74 +238,80 @@ def get_file_icon_and_badge(name: str, is_dir: bool) -> Tuple[str, str]:
 
 
 # -----------------------------------------------------------------------------
-# Smooth Sliding Theme Toggle Switch
+# Sleek Navigation Rail Icon Button
 # -----------------------------------------------------------------------------
-class ThemeToggleSwitch(tk.Canvas):
-    """Smooth sliding animated toggle switch with sun/moon icon."""
+class NavRailButton(tk.Canvas):
+    """Sleek vertical rail icon button with glowing active pill indicator."""
 
     def __init__(
         self,
         parent: Any,
-        is_dark: bool = True,
-        command: Optional[Callable[[bool], None]] = None,
-        width: int = 54,
-        height: int = 28,
-        bg_parent: str = "#070D18",
+        icon: str,
+        label: str,
+        command: Optional[Callable[[], None]] = None,
+        is_active: bool = False,
+        width: int = 58,
+        height: int = 50,
     ) -> None:
-        super().__init__(parent, width=width, height=height, highlightthickness=0, bd=0, bg=bg_parent)
-        self.is_dark = is_dark
+        super().__init__(parent, width=width, height=height, highlightthickness=0, bd=0, bg="#060B14")
+        self.icon = icon
+        self.label = label
         self.command = command
+        self.is_active = is_active
+        self.is_hovered = False
         self.width = width
         self.height = height
-        self.knob_x = 39 if is_dark else 15
-        self.target_x = self.knob_x
-        self.bg_parent = bg_parent
 
         self.bind("<Button-1>", self._on_click)
-        self.bind("<Enter>", lambda e: self.config(cursor="hand2"))
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
         self._redraw()
 
-    def set_state(self, is_dark: bool, bg_parent: str = "") -> None:
-        self.is_dark = is_dark
-        self.target_x = 39 if is_dark else 15
-        if bg_parent:
-            self.bg_parent = bg_parent
-            self.configure(bg=bg_parent)
-        self._animate_knob()
+    def set_active(self, active: bool) -> None:
+        self.is_active = active
+        self._redraw()
+
+    def _on_enter(self, event: Any) -> None:
+        self.is_hovered = True
+        self.config(cursor="hand2")
+        self._redraw()
+
+    def _on_leave(self, event: Any) -> None:
+        self.is_hovered = False
+        self._redraw()
 
     def _on_click(self, event: Any) -> None:
-        self.is_dark = not self.is_dark
-        self.target_x = 39 if self.is_dark else 15
-        self._animate_knob()
         if self.command:
-            self.command(self.is_dark)
+            self.command()
 
-    def _animate_knob(self) -> None:
-        step = 4 if self.target_x > self.knob_x else -4
-        if abs(self.target_x - self.knob_x) > abs(step):
-            self.knob_x += step
-            self._redraw()
-            self.after(16, self._animate_knob)
-        else:
-            self.knob_x = self.target_x
-            self._redraw()
+    def _draw_rounded_rect(self, x1: int, y1: int, x2: int, y2: int, r: int, fill: str, outline: str, width: int = 1) -> None:
+        points = [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+        self.create_polygon(points, smooth=True, fill=fill, outline=outline, width=width)
 
     def _redraw(self) -> None:
         self.delete("all")
-        bg_color = "#0284C7" if self.is_dark else "#94A3B8"
-        # Pill body
-        self.create_oval(1, 1, 27, 27, fill=bg_color, outline="")
-        self.create_oval(self.width - 27, 1, self.width - 1, 27, fill=bg_color, outline="")
-        self.create_rectangle(14, 1, self.width - 14, 27, fill=bg_color, outline="")
+        self.configure(bg="#060B14")
 
-        # Circular sliding knob
-        kx = self.knob_x
-        self.create_oval(kx - 10, 4, kx + 10, 24, fill="#FFFFFF", outline="#CBD5E1", width=1)
-        glyph = "🌙" if self.is_dark else "☀️"
-        self.create_text(kx, 14, text=glyph, font=("Segoe UI", 7))
+        # Active glow pill or hover background (inspired by modern dashboard reference)
+        if self.is_active:
+            self._draw_rounded_rect(4, 3, self.width - 4, self.height - 3, 10, "#102644", "#38BDF8", width=1)
+            self.create_line(5, 12, 5, self.height - 12, fill="#38BDF8", width=3, capstyle=tk.ROUND)
+            icon_color = "#38BDF8"
+            text_color = "#F8FAFC"
+        elif self.is_hovered:
+            self._draw_rounded_rect(4, 3, self.width - 4, self.height - 3, 8, "#0F1A2D", "#1E3354", width=1)
+            icon_color = "#E2E8F0"
+            text_color = "#CBD5E1"
+        else:
+            icon_color = "#94A3B8"
+            text_color = "#64748B"
 
-
-MacOSSwitch = ThemeToggleSwitch
+        self.create_text(self.width // 2, 17, text=self.icon, font=("Segoe UI Emoji", 13), fill=icon_color)
+        self.create_text(self.width // 2, 37, text=self.label, font=("Segoe UI Variable Text", 7, "bold"), fill=text_color)
 
 
 # -----------------------------------------------------------------------------
@@ -327,24 +369,24 @@ class AnimatedButton(tk.Canvas):
         t = THEMES[self.theme_name]
         if self.btn_style == "primary":
             if self.is_pressed or self.is_hovered:
-                return (t["accent_hover"], t["accent_glow"], t["accent_text"])
-            return (t["accent"], t["card_border"], t["accent_text"])
+                return (t["accent_hover"], "#7DD3FC", t["accent_text"])
+            return (t["accent"], "#38BDF8", t["accent_text"])
         elif self.btn_style == "danger":
             if self.is_pressed or self.is_hovered:
                 return ("#DC2626", "#F87171", "#FFFFFF")
-            return ("#991B1B" if self.theme_name == "dark" else "#EF4444", "#F87171", "#FFFFFF")
+            return ("#991B1B", "#F87171", "#FFFFFF")
         else:
             if self.is_pressed or self.is_hovered:
-                return (t["secondary_hover"], t["accent"], t["secondary_text"])
+                return (t["secondary_hover"], t["accent_glow"], t["secondary_text"])
             return (t["secondary_btn"], t["secondary_border"], t["secondary_text"])
 
-    def _draw_rounded_rect(self, x1: int, y1: int, x2: int, y2: int, r: int, fill: str, outline: str) -> None:
+    def _draw_rounded_rect(self, x1: int, y1: int, x2: int, y2: int, r: int, fill: str, outline: str, width: int = 1) -> None:
         points = [
             x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
             x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
             x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
         ]
-        self.create_polygon(points, smooth=True, fill=fill, outline=outline, width=1)
+        self.create_polygon(points, smooth=True, fill=fill, outline=outline, width=width)
 
     def _redraw(self) -> None:
         self.delete("all")
@@ -353,9 +395,10 @@ class AnimatedButton(tk.Canvas):
         self.configure(bg=bg_canvas)
         padding = 2 if not self.is_pressed else 3
         r = 8
+        outline_w = 2 if (self.btn_style == "primary" and (self.is_hovered or self.is_pressed)) else 1
         self._draw_rounded_rect(
             padding, padding, max(padding + 10, self.width - padding), self.btn_height - padding,
-            r, bg_fill, border_color
+            r, bg_fill, border_color, width=outline_w
         )
         self.create_text(
             self.width // 2, self.btn_height // 2,
@@ -510,6 +553,7 @@ class BlitzPackMainWindow(tk.Tk):
         self.var_search = tk.StringVar()
         self.var_search.trace_add("write", lambda *args: self._render_tree_items())
 
+        self.rail_buttons: Dict[str, NavRailButton] = {}
         self.animated_buttons: List[AnimatedButton] = []
         self._active_job: bool = False
         self._cancel_event: Optional[threading.Event] = None
@@ -612,11 +656,11 @@ class BlitzPackMainWindow(tk.Tk):
         # If dropped target is a directory or file, add to archive
         self._action_add_to_archive(specific_target=valid_paths[0])
 
-    def _apply_theme_styling(self, is_dark: bool) -> None:
-        """Apply unified theme styling to all ttk widgets, canvases, and windows title bar."""
-        self.current_theme = "dark" if is_dark else "light"
-        sv_ttk.set_theme(self.current_theme)
-        apply_windows_dark_titlebar(self, dark=is_dark)
+    def _apply_theme_styling(self, is_dark: bool = True) -> None:
+        """Apply unified permanent dark theme styling to all ttk widgets, canvases, and windows title bar."""
+        self.current_theme = "dark"
+        sv_ttk.set_theme("dark")
+        apply_windows_dark_titlebar(self, dark=True)
 
         t = THEMES[self.current_theme]
         self.configure(bg=t["bg"])
@@ -646,10 +690,10 @@ class BlitzPackMainWindow(tk.Tk):
             self.lbl_logo.configure(foreground=t["accent"], background=t["bg"])
         if hasattr(self, "lbl_badge"):
             self.lbl_badge.configure(background=t["card_border"], foreground=t["text_secondary"])
+        if hasattr(self, "lbl_engine_status"):
+            self.lbl_engine_status.configure(background=t["card_bg"], foreground="#38BDF8")
         if hasattr(self, "lbl_status_mode"):
             self.lbl_status_mode.configure(foreground=t["accent"], background=t["bg"])
-        if hasattr(self, "theme_switch"):
-            self.theme_switch.set_state(is_dark, bg_parent=t["bg"])
         if hasattr(self, "lbl_drop_title"):
             self.lbl_drop_title.configure(background=t["card_bg"], foreground=t["text_primary"])
         if hasattr(self, "lbl_drop_sub"):
@@ -685,7 +729,36 @@ class BlitzPackMainWindow(tk.Tk):
             self.live_graph.set_theme(self.current_theme)
 
     def _on_switch_toggled(self, is_dark: bool) -> None:
-        self._apply_theme_styling(is_dark)
+        pass
+
+    def _update_rail_active(self, active_key: str) -> None:
+        """Update active glowing pill on navigation rail buttons."""
+        for key, btn in self.rail_buttons.items():
+            btn.set_active(key == active_key)
+
+    def _update_rail_active_by_path(self, path: Path) -> None:
+        """Determine and highlight the active rail button based on navigated path."""
+        try:
+            resolved = path.resolve()
+            desktop_path = Path(get_desktop_dir()).resolve()
+            if resolved == (Path.home() / "Downloads").resolve():
+                self._update_rail_active("downloads")
+            elif resolved == (Path.home() / "Documents").resolve():
+                self._update_rail_active("docs")
+            elif resolved == desktop_path:
+                self._update_rail_active("desktop")
+            elif resolved == Path.home().resolve():
+                self._update_rail_active("home")
+            else:
+                self._update_rail_active("files")
+        except Exception:
+            self._update_rail_active("files")
+
+    def _action_focus_files(self) -> None:
+        """Focus File Explorer view in the workspace."""
+        if self.mode == "archive":
+            self._navigate_to_directory(self.current_dir)
+        self._update_rail_active("files")
 
     def _build_ui(self) -> None:
         t = THEMES[self.current_theme]
@@ -719,7 +792,7 @@ class BlitzPackMainWindow(tk.Tk):
         self.root_container.pack(fill="both", expand=True)
 
         # ---------------------------------------------------------------------
-        # 1. Header Bar (Brand Logo, Live Search, Sliding Theme Toggle)
+        # 1. Header Bar (Brand Logo, Engine Status Pill, Search Entry)
         # ---------------------------------------------------------------------
         top_bar = ttk.Frame(self.root_container, padding=(14, 10, 14, 8))
         top_bar.pack(fill="x")
@@ -734,32 +807,64 @@ class BlitzPackMainWindow(tk.Tk):
         self.lbl_badge = ttk.Label(
             brand_frame, text=" v1.0 ", font=("Segoe UI", 8), background=t["card_border"], foreground=t["text_secondary"]
         )
-        self.lbl_badge.pack(side="left", padx=(8, 0))
+        self.lbl_badge.pack(side="left", padx=(8, 8))
 
-        # Right side: Theme Toggle Switch
-        switch_frame = ttk.Frame(top_bar)
-        switch_frame.pack(side="right", padx=(8, 0))
-        self.theme_switch = ThemeToggleSwitch(
-            switch_frame,
-            is_dark=(self.current_theme == "dark"),
-            command=self._on_switch_toggled,
-            bg_parent=t["bg"]
+        # Engine Status Pill
+        self.lbl_engine_status = ttk.Label(
+            brand_frame, text="● Engine Ready", font=("Segoe UI Variable Text", 8, "bold"),
+            background=t["card_bg"], foreground="#38BDF8", padding=(6, 2)
         )
-        self.theme_switch.pack(side="right")
-        self.macos_switch = self.theme_switch  # Backward-compatible alias
+        self.lbl_engine_status.pack(side="left")
 
-        # Live Search Filter
+        # Live Search Filter (Right aligned)
         search_box = ttk.Frame(top_bar)
-        search_box.pack(side="right", padx=(0, 12))
+        search_box.pack(side="right", padx=(0, 2))
         lbl_search_icon = ttk.Label(search_box, text="🔍", font=("Segoe UI", 9))
         lbl_search_icon.pack(side="left", padx=(0, 4))
-        self.ent_search = ttk.Entry(search_box, textvariable=self.var_search, width=22, font=("Segoe UI", 9))
+        self.ent_search = ttk.Entry(search_box, textvariable=self.var_search, width=24, font=("Segoe UI", 9))
         self.ent_search.pack(side="left")
+
+        # ---------------------------------------------------------------------
+        # Main Body Layout: Navigation Rail (Left) + Workspace Area (Right)
+        # ---------------------------------------------------------------------
+        body_container = ttk.Frame(self.root_container)
+        body_container.pack(fill="both", expand=True)
+
+        # Left Vertical Navigation Rail (Inspired by modern dashboard dock)
+        self.rail_frame = tk.Frame(body_container, width=64, bg="#060B14", highlightbackground="#152033", highlightthickness=1)
+        self.rail_frame.pack(side="left", fill="y", padx=(6, 0), pady=(0, 6))
+        self.rail_frame.pack_propagate(False)
+
+        # Rail Quick Nav Buttons
+        rail_items = [
+            ("files", "📁", "Files", self._action_focus_files, True),
+            ("home", "🏠", "Home", lambda: self._navigate_to_directory(Path.home()), False),
+            ("downloads", "📥", "Downloads", lambda: self._navigate_to_directory(Path.home() / "Downloads"), False),
+            ("docs", "📝", "Docs", lambda: self._navigate_to_directory(Path.home() / "Documents"), False),
+            ("desktop", "🖥️", "Desktop", lambda: self._navigate_to_directory(Path(get_desktop_dir())), False),
+            ("archives", "📦", "Archives", self._action_open_archive_dialog, False),
+        ]
+        for key, icon, label, cmd, is_active in rail_items:
+            btn = NavRailButton(
+                self.rail_frame,
+                icon=icon,
+                label=label,
+                command=cmd,
+                is_active=is_active,
+                width=58,
+                height=50,
+            )
+            btn.pack(side="top", pady=3, padx=2)
+            self.rail_buttons[key] = btn
+
+        # Workspace Area (Right of Navigation Rail)
+        workspace_frame = ttk.Frame(body_container)
+        workspace_frame.pack(side="right", fill="both", expand=True)
 
         # ---------------------------------------------------------------------
         # 2. Navigation Ribbon
         # ---------------------------------------------------------------------
-        nav_ribbon = ttk.Frame(self.root_container, padding=(14, 2, 14, 8))
+        nav_ribbon = ttk.Frame(workspace_frame, padding=(8, 2, 14, 8))
         nav_ribbon.pack(fill="x")
 
         self.btn_back = ttk.Button(nav_ribbon, text=" ◀ ", width=3, command=self._action_back)
@@ -788,9 +893,9 @@ class BlitzPackMainWindow(tk.Tk):
         self.btn_refresh.pack(side="left")
 
         # ---------------------------------------------------------------------
-        # 3. Status Bar (Pack side="bottom" first to guarantee no scrollbar overlap)
+        # 3. Status Bar (Pack side="bottom" inside workspace_frame)
         # ---------------------------------------------------------------------
-        statusbar = ttk.Frame(self.root_container, padding=(14, 4, 14, 6))
+        statusbar = ttk.Frame(workspace_frame, padding=(8, 4, 14, 6))
         statusbar.pack(fill="x", side="bottom")
 
         self.lbl_status_items = ttk.Label(statusbar, text="0 items", font=("Segoe UI", 9))
@@ -807,8 +912,8 @@ class BlitzPackMainWindow(tk.Tk):
         # ---------------------------------------------------------------------
         # 4. Main Split View (70% Table, 30% Decluttered Sidebar)
         # ---------------------------------------------------------------------
-        paned = ttk.PanedWindow(self.root_container, orient="horizontal")
-        paned.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+        paned = ttk.PanedWindow(workspace_frame, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=(8, 14), pady=(0, 6))
 
         # LEFT PANE (70%): File Table
         left_pane = ttk.Frame(paned)
@@ -1096,6 +1201,7 @@ class BlitzPackMainWindow(tk.Tk):
         self.ent_address.insert(0, str(path))
         self.title(f"⚡ BlitzPack - {path.name} - [{path}]")
         self.lbl_status_mode.configure(text="[Filesystem Mode]", foreground=THEMES[self.current_theme]["accent"])
+        self._update_rail_active_by_path(path)
 
         self._refresh_filesystem_view()
 
@@ -1167,6 +1273,7 @@ class BlitzPackMainWindow(tk.Tk):
         self.lbl_perf_ticker.configure(
             text=f"Size: {format_bytes(archive_path.stat().st_size)} • {len(manifest_entries)} files"
         )
+        self._update_rail_active("archives")
         self._refresh_archive_view()
 
     def _refresh_archive_view(self) -> None:
