@@ -42,7 +42,7 @@ def handle_compress(args: argparse.Namespace) -> None:
 
     out_path = Path(args.output).resolve() if args.output else in_path.with_suffix(".blitz")
     workers = args.workers or os.cpu_count() or 4
-    
+
     raw_level = str(args.level).lower().strip()
     if raw_level in LEVEL_PROFILES:
         level = LEVEL_PROFILES[raw_level]

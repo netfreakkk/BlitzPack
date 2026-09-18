@@ -396,7 +396,7 @@ def main():
             sys.exit(1)
 
     root = tk.Tk()
-    app = InstallerGUI(root)
+    InstallerGUI(root)
     root.mainloop()
 
 

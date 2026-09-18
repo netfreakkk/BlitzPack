@@ -7,7 +7,7 @@ import stat
 from typing import List, Optional
 from .utils import normalize_relative_path, sanitize_windows_path
 
-from .constants import CHUNK_SIZE, INLINE_MAX_SIZE, MAX_PRELOAD_BUDGET
+from .constants import CHUNK_SIZE
 
 # A file is chunked if the scheduler will split it, and bundled otherwise.
 CHUNKED_THRESHOLD = CHUNK_SIZE

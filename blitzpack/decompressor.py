@@ -252,8 +252,11 @@ def decompress(
 
     def _safe_target(rel_path: str) -> Path:
         """Resolve an archive path under out_root, refusing any escape (Zip Slip)."""
-        clean_rel = rel_path.lstrip("/\\")
-        resolved = (out_root / clean_rel).resolve()
+        if rel_path.startswith(("/", "\\")) or (len(rel_path) >= 2 and rel_path[1] == ":") or Path(rel_path).is_absolute():
+            raise ArchiveFormatError(
+                f"Refusing to extract outside destination (path traversal): {rel_path!r}"
+            )
+        resolved = (out_root / rel_path).resolve()
         if resolved != out_root and not resolved.is_relative_to(out_root):
             raise ArchiveFormatError(
                 f"Refusing to extract outside destination (path traversal): {rel_path!r}"

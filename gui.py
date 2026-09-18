@@ -234,7 +234,6 @@ class MacOSSwitch(tk.Canvas):
     def _redraw(self) -> None:
         self.delete("all")
         bg_color = "#0284C7" if self.is_dark else "#94A3B8"
-        r = 13
         # Pill body
         self.create_oval(1, 1, 27, 27, fill=bg_color, outline="")
         self.create_oval(self.width - 27, 1, self.width - 1, 27, fill=bg_color, outline="")
@@ -983,7 +982,6 @@ class BlitzPackMainWindow(tk.Tk):
             with open(archive_path, "rb") as f_in:
                 reader = BlitzArchiveReader(f_in)
                 manifest_entries = list(reader.manifest)
-                seek_entries_count = len(reader.seek_entries)
         except Exception as ex:
             messagebox.showerror("Invalid Archive", f"Failed to open .blitz archive:\n{str(ex)}")
             return
@@ -1274,7 +1272,8 @@ class BlitzPackMainWindow(tk.Tk):
                 self.after(0, lambda: self.lbl_perf_op.configure(text="⚠️ Compression Cancelled"))
                 self.after(0, lambda: self.lbl_perf_ticker.configure(text="Pipeline halted cleanly"))
             except Exception as ex:
-                self.after(0, lambda: self.lbl_perf_op.configure(text=f"❌ Error: {str(ex)[:40]}"))
+                err_msg = str(ex)[:40]
+                self.after(0, lambda m=err_msg: self.lbl_perf_op.configure(text=f"❌ Error: {m}"))
             finally:
                 self._active_job = False
                 self._cancel_event = None
@@ -1361,7 +1360,8 @@ class BlitzPackMainWindow(tk.Tk):
                 self.after(0, lambda: self.lbl_perf_op.configure(text="⚠️ Extraction Cancelled"))
                 self.after(0, lambda: self.lbl_perf_ticker.configure(text="Pipeline halted cleanly"))
             except Exception as ex:
-                self.after(0, lambda: self.lbl_perf_op.configure(text=f"❌ Error: {str(ex)[:40]}"))
+                err_msg = str(ex)[:40]
+                self.after(0, lambda m=err_msg: self.lbl_perf_op.configure(text=f"❌ Error: {m}"))
             finally:
                 self._active_job = False
                 self._cancel_event = None
@@ -1409,7 +1409,8 @@ class BlitzPackMainWindow(tk.Tk):
                 self.after(0, lambda: self.lbl_perf_metrics.configure(text="xxHash64 Whole-Archive & Seek Table Valid"))
                 self.after(0, lambda: self.prog_bar.configure(value=100))
             except Exception as ex:
-                self.after(0, lambda: self.lbl_perf_op.configure(text=f"❌ Test Failed: {str(ex)[:30]}"))
+                err_msg = str(ex)[:30]
+                self.after(0, lambda m=err_msg: self.lbl_perf_op.configure(text=f"❌ Test Failed: {m}"))
             finally:
                 self._active_job = False
 

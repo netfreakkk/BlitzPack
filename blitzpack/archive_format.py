@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 import os
-from pathlib import Path
 import struct
 from typing import BinaryIO, Dict, List, Optional
 import msgpack

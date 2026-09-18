@@ -1,14 +1,16 @@
 """Regression and integrity test suite ensuring no silent corruption occurs."""
 
 import os
+from pathlib import Path
+import struct
 import subprocess
 import sys
-from pathlib import Path
 import pytest
 
-from blitzpack import compress, decompress, BlitzArchiveReader
-from blitzpack.archive_format import ArchiveFormatError, CHUNK_DATA_START
+from blitzpack import BlitzArchiveReader, compress, decompress
 from blitzpack.analyzer import FileAnalyzer
+from blitzpack.archive_format import ArchiveFormatError, BlitzArchiveWriter, CHUNK_DATA_START, FLAG_STORED, ManifestEntry
+from blitzpack.checksum import compute_digest
 from blitzpack.compressor import SequentialReader, SourceReadError
 from blitzpack.scheduler import WorkScheduler
 
@@ -155,10 +157,6 @@ def test_permissions_restored_on_posix(tmp_path: Path):
 # =============================================================================
 # Security Hardening & Robustness Tests (docs/robust.md)
 # =============================================================================
-
-import struct
-from blitzpack.archive_format import BlitzArchiveWriter, ManifestEntry, FLAG_STORED
-from blitzpack.checksum import compute_digest
 
 
 def _build_archive_with_manifest_path(archive_path: Path, rel_path: str):

@@ -4,8 +4,7 @@ from dataclasses import dataclass
 import os
 import platform
 from pathlib import Path
-import sys
-from typing import Callable, Optional
+from typing import Callable
 
 
 @dataclass(slots=True)

@@ -3,9 +3,6 @@
 import hashlib
 import os
 from pathlib import Path
-import shutil
-import tempfile
-import pytest
 
 from blitzpack import compress, decompress, BlitzArchiveReader
 from blitzpack.checksum import compute_file_digest
