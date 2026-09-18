@@ -2,14 +2,14 @@
 
 # ⚡ BlitzPack
 
-### Intelligent, High-Throughput Parallel Archiver for Windows, Linux & macOS
+### Intelligent, High-Throughput Parallel Archiver for Windows
 
 **3.8× FASTER than WinRAR • 70× FASTER than 7-Zip • 100% Compression Density Parity • Seekable `.blitz` Format**
 
 [![Tests](https://img.shields.io/badge/tests-19%20passed-success?style=flat-square&logo=pytest)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey?style=flat-square)]()
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue?style=flat-square&logo=windows)]()
 [![Format](https://img.shields.io/badge/format-seekable%20.blitz-orange?style=flat-square)](FORMAT.md)
 
 </div>
