@@ -58,3 +58,4 @@ blitzpack_benchmark_prompt.md
 .gemini/
 benchmark.py
 scratch/
+docs/
