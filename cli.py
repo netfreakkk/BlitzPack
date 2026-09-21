@@ -200,37 +200,66 @@ def handle_list(args: argparse.Namespace) -> None:
         console.print(f"[bold red]Error:[/] Archive file does not exist: {arc_path}")
         sys.exit(4)
 
-    with open(arc_path, "rb") as f:
-        reader = BlitzArchiveReader(f)
+    from blitzpack.multi_decompress import get_archive_format, inspect_archive
+    fmt = get_archive_format(arc_path)
 
-        table = Table(title=f"Archive: {arc_path.name}", show_lines=True)
+    if fmt == "blitz":
+        with open(arc_path, "rb") as f:
+            reader = BlitzArchiveReader(f)
+
+            table = Table(title=f"Archive: {arc_path.name} (BlitzPack format)", show_lines=True)
+            table.add_column("Type", justify="center", style="cyan")
+            table.add_column("Path", style="magenta")
+            table.add_column("Size", justify="right")
+            table.add_column("Chunks", justify="center")
+
+            type_names = {0: "File", 1: "Dir", 2: "Link"}
+
+            for entry in reader.manifest:
+                type_str = type_names.get(entry.file_type, "?")
+                chunk_span = (
+                    "-" if entry.start_chunk == -1 else (
+                        str(entry.start_chunk) if entry.start_chunk == entry.end_chunk
+                        else f"{entry.start_chunk}..{entry.end_chunk}"
+                    )
+                )
+                table.add_row(
+                    type_str,
+                    entry.path,
+                    format_bytes(entry.size) if entry.file_type == 0 else "-",
+                    chunk_span
+                )
+
+            console.print(table)
+            console.print(
+                f"\nTotal: [bold cyan]{len(reader.manifest)}[/] entries, "
+                f"[bold cyan]{format_bytes(reader.footer.total_original_size)}[/] uncompressed in "
+                f"[bold cyan]{len(reader.seek_entries)}[/] chunks.\n"
+            )
+    else:
+        entries = inspect_archive(arc_path)
+        table = Table(title=f"Archive: {arc_path.name} ({fmt.upper()} format)", show_lines=True)
         table.add_column("Type", justify="center", style="cyan")
         table.add_column("Path", style="magenta")
         table.add_column("Size", justify="right")
-        table.add_column("Chunks", justify="center")
+        table.add_column("Packed Size", justify="right")
 
         type_names = {0: "File", 1: "Dir", 2: "Link"}
-
-        for entry in reader.manifest:
+        total_size = 0
+        for entry in entries:
             type_str = type_names.get(entry.file_type, "?")
-            chunk_span = (
-                "-" if entry.start_chunk == -1 else (
-                    str(entry.start_chunk) if entry.start_chunk == entry.end_chunk
-                    else f"{entry.start_chunk}..{entry.end_chunk}"
-                )
-            )
+            total_size += entry.size
             table.add_row(
                 type_str,
                 entry.path,
                 format_bytes(entry.size) if entry.file_type == 0 else "-",
-                chunk_span
+                format_bytes(entry.packed_size) if entry.packed_size > 0 else "-"
             )
 
         console.print(table)
         console.print(
-            f"\nTotal: [bold cyan]{len(reader.manifest)}[/] entries, "
-            f"[bold cyan]{format_bytes(reader.footer.total_original_size)}[/] uncompressed in "
-            f"[bold cyan]{len(reader.seek_entries)}[/] chunks.\n"
+            f"\nTotal: [bold cyan]{len(entries)}[/] entries, "
+            f"[bold cyan]{format_bytes(total_size)}[/] uncompressed.\n"
         )
 
 
@@ -287,50 +316,95 @@ def handle_verify(args: argparse.Namespace) -> None:
         console.print(f"[bold red]Error:[/] Archive file does not exist: {arc_path}")
         sys.exit(4)
 
-    mode = "deep (every chunk decompressed)" if args.deep else "fast (whole-archive digest)"
-    console.print(Panel(
-        f"[bold cyan]Archive:[/] {arc_path}\n[bold cyan]Mode:[/] {mode}",
-        title="BlitzPack Verify",
-        border_style="cyan",
-    ))
+    from blitzpack.multi_decompress import get_archive_format, test_archive
+    fmt = get_archive_format(arc_path)
 
-    start = time.perf_counter()
-    try:
-        with open(arc_path, "rb") as f:
-            reader = BlitzArchiveReader(f)
-            if args.deep:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                    TimeRemainingColumn(),
-                    console=console,
-                ) as progress:
-                    task_id = progress.add_task("Verifying chunks...", total=len(reader.seek_entries))
-                    reader.verify(deep=True, progress_callback=lambda done, total: progress.update(task_id, completed=done, total=total))
-            else:
-                reader.verify(deep=False)
-            entry_count = len(reader.manifest)
-            chunk_count = len(reader.seek_entries)
-            original = reader.footer.total_original_size
-    except (ArchiveFormatError, OSError) as exc:
+    if fmt == "blitz":
+        mode = "deep (every chunk decompressed)" if args.deep else "fast (whole-archive digest)"
         console.print(Panel(
-            f"[bold red]Verification FAILED[/]\n\n{exc}",
-            title="Corrupt Archive",
-            border_style="red",
+            f"[bold cyan]Archive:[/] {arc_path}\n[bold cyan]Mode:[/] {mode}",
+            title="BlitzPack Verify",
+            border_style="cyan",
         ))
-        sys.exit(2)
 
-    console.print(Panel(
-        f"[bold green]Archive is intact.[/]\n\n"
-        f"Entries:          {entry_count}\n"
-        f"Chunks verified:  {chunk_count}\n"
-        f"Original Size:    {format_bytes(original)}\n"
-        f"Elapsed:          {time.perf_counter() - start:.2f}s",
-        title="Verification Complete",
-        border_style="green",
-    ))
+        start = time.perf_counter()
+        try:
+            with open(arc_path, "rb") as f:
+                reader = BlitzArchiveReader(f)
+                if args.deep:
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                        TimeRemainingColumn(),
+                        console=console,
+                    ) as progress:
+                        task_id = progress.add_task("Verifying chunks...", total=len(reader.seek_entries))
+                        reader.verify(deep=True, progress_callback=lambda done, total: progress.update(task_id, completed=done, total=total))
+                else:
+                    reader.verify(deep=False)
+                entry_count = len(reader.manifest)
+                chunk_count = len(reader.seek_entries)
+                original = reader.footer.total_original_size
+        except (ArchiveFormatError, OSError) as exc:
+            console.print(Panel(
+                f"[bold red]Verification FAILED[/]\n\n{exc}",
+                title="Corrupt Archive",
+                border_style="red",
+            ))
+            sys.exit(2)
+
+        console.print(Panel(
+            f"[bold green]Archive is intact.[/]\n\n"
+            f"Entries:          {entry_count}\n"
+            f"Chunks verified:  {chunk_count}\n"
+            f"Original Size:    {format_bytes(original)}\n"
+            f"Elapsed:          {time.perf_counter() - start:.2f}s",
+            title="Verification Complete",
+            border_style="green",
+        ))
+    else:
+        console.print(Panel(
+            f"[bold cyan]Archive:[/] {arc_path}\n[bold cyan]Format:[/] {fmt.upper()}",
+            title="Archive Integrity Verification",
+            border_style="cyan",
+        ))
+        start = time.perf_counter()
+        ok, msg = test_archive(arc_path)
+        if ok:
+            console.print(Panel(
+                f"[bold green]Archive is intact.[/]\n\n"
+                f"Status:   {msg}\n"
+                f"Elapsed:  {time.perf_counter() - start:.2f}s",
+                title="Verification Complete",
+                border_style="green",
+            ))
+        else:
+            console.print(Panel(
+                f"[bold red]Verification FAILED[/]\n\n{msg}",
+                title="Corrupt Archive",
+                border_style="red",
+            ))
+            sys.exit(2)
+
+
+def handle_register_shell(args: argparse.Namespace) -> None:
+    from blitzpack.shell_integration import register_shell_context_menu
+    if register_shell_context_menu():
+        console.print("[bold green]Success:[/] BlitzPack Windows Explorer context menus registered successfully!")
+    else:
+        console.print("[bold red]Failed:[/] Could not write context menu keys to Windows Registry.")
+        sys.exit(1)
+
+
+def handle_unregister_shell(args: argparse.Namespace) -> None:
+    from blitzpack.shell_integration import unregister_shell_context_menu
+    if unregister_shell_context_menu():
+        console.print("[bold green]Success:[/] BlitzPack Windows Explorer context menus unregistered.")
+    else:
+        console.print("[bold red]Failed:[/] Could not remove context menu keys from Windows Registry.")
+        sys.exit(1)
 
 
 def main() -> None:
@@ -361,8 +435,8 @@ def main() -> None:
     p_comp.set_defaults(func=handle_compress)
 
     # Decompress (Extract All)
-    p_decomp = subparsers.add_parser("decompress", help="Extract all files from a .blitz archive")
-    p_decomp.add_argument("archive", help="Path to .blitz archive")
+    p_decomp = subparsers.add_parser("decompress", help="Extract all files from an archive (.blitz, .rar, .zip, .7z, .tar*, etc.)")
+    p_decomp.add_argument("archive", help="Path to archive (.blitz, .rar, .zip, .7z, .tar*, etc.)")
     p_decomp.add_argument("-o", "--output", help="Target extraction directory")
     p_decomp.add_argument("-w", "--workers", type=int, default=0, help="CPU worker count (default: all cores)")
     p_decomp.set_defaults(func=handle_decompress)
@@ -371,22 +445,22 @@ def main() -> None:
     p_extract = subparsers.add_parser(
         "extract", help="Extract only specific files or folders (random access)"
     )
-    p_extract.add_argument("archive", help="Path to .blitz archive")
+    p_extract.add_argument("archive", help="Path to archive (.blitz, .rar, .zip, .7z, .tar*, etc.)")
     p_extract.add_argument("paths", nargs="+", help="Archive-relative path(s) to extract")
     p_extract.add_argument("-o", "--output", help="Target extraction directory")
     p_extract.add_argument("-w", "--workers", type=int, default=0, help="CPU worker count")
     p_extract.set_defaults(func=handle_extract)
 
     # List
-    p_list = subparsers.add_parser("list", help="List archive entries")
-    p_list.add_argument("archive", help="Path to .blitz archive")
+    p_list = subparsers.add_parser("list", help="List archive entries (.blitz, .rar, .zip, .7z, .tar*, etc.)")
+    p_list.add_argument("archive", help="Path to archive (.blitz, .rar, .zip, .7z, .tar*, etc.)")
     p_list.set_defaults(func=handle_list)
 
     # Verify
     p_verify = subparsers.add_parser(
         "verify", aliases=["test"], help="Check archive integrity without extracting"
     )
-    p_verify.add_argument("archive", help="Path to .blitz archive")
+    p_verify.add_argument("archive", help="Path to archive (.blitz, .rar, .zip, .7z, .tar*, etc.)")
     p_verify.add_argument(
         "--deep",
         action="store_true",
@@ -398,6 +472,14 @@ def main() -> None:
     p_analyze = subparsers.add_parser("analyze", help="Profile files and display scheduling breakdown (dry run)")
     p_analyze.add_argument("input", help="Source folder or file path")
     p_analyze.set_defaults(func=handle_analyze)
+
+    # Register Shell
+    p_reg = subparsers.add_parser("register-shell", help="Register WinRAR-style context menus in Windows Explorer")
+    p_reg.set_defaults(func=handle_register_shell)
+
+    # Unregister Shell
+    p_unreg = subparsers.add_parser("unregister-shell", help="Unregister BlitzPack context menus from Windows Explorer")
+    p_unreg.set_defaults(func=handle_unregister_shell)
 
     args = parser.parse_args()
     try:

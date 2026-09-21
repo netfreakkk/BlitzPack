@@ -246,6 +246,19 @@ def decompress(
     """Extract a .blitz archive in parallel with path traversal protection, cancellation, and selective extraction."""
     arc_p = Path(archive_path).resolve()
     out_p = Path(output_dir).resolve()
+
+    from .multi_decompress import get_archive_format, extract_archive
+    fmt = get_archive_format(arc_p)
+    if fmt != "blitz":
+        return extract_archive(
+            archive_path=arc_p,
+            output_dir=out_p,
+            workers=workers,
+            include=include,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
+
     out_root = out_p
     num_workers = workers or os.cpu_count() or 4
     created_output_root = not out_p.exists()

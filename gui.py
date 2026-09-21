@@ -31,9 +31,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import psutil
 import sv_ttk
 
-from blitzpack.archive_format import BlitzArchiveReader
 from blitzpack.compressor import CompressionResult, compress
 from blitzpack.decompressor import DecompressionResult, decompress
+from blitzpack.multi_decompress import (
+    get_archive_format,
+    inspect_archive,
+    is_supported_archive,
+    test_archive,
+)
+from blitzpack.shell_integration import (
+    is_shell_context_menu_registered,
+    register_shell_context_menu,
+    unregister_shell_context_menu,
+)
 from blitzpack.utils import BlitzCancelled, ProgressUpdate, format_bytes, sanitize_windows_path
 
 # Enable Windows Per-Monitor High-DPI Awareness (V2) for crisp rendering
@@ -567,7 +577,122 @@ class BlitzPackMainWindow(tk.Tk):
         self._setup_native_drag_and_drop()
         self._navigate_to_directory(self.current_dir)
         self._start_graph_heartbeat()
+        self._handle_cli_launch_args()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _handle_cli_launch_args(self) -> None:
+        """Process CLI arguments when launched from Windows Explorer context menu."""
+        args = sys.argv[1:]
+        if not args:
+            return
+
+        first = args[0]
+        if first == "--extract-here" and len(args) > 1:
+            target = Path(args[1]).resolve()
+            if target.exists() and is_supported_archive(target):
+                self.after(200, lambda: self._action_extract_to(specific_archive=target, dest_override=target.parent))
+        elif first == "--extract-to" and len(args) > 1:
+            target = Path(args[1]).resolve()
+            if target.exists() and is_supported_archive(target):
+                self.after(200, lambda: self._action_extract_to(specific_archive=target, dest_override=target.parent / target.stem))
+        elif first == "--compress" and len(args) > 1:
+            target = Path(args[1]).resolve()
+            if target.exists():
+                self.after(200, lambda: self._action_add_to_archive(specific_target=target))
+        elif first == "--quick-compress" and len(args) > 1:
+            target = Path(args[1]).resolve()
+            if target.exists():
+                self.after(200, lambda: self._action_quick_compress(target))
+        else:
+            target = Path(first).resolve()
+            if target.exists():
+                if is_supported_archive(target):
+                    self.after(200, lambda: self._open_archive(target))
+                elif target.is_dir():
+                    self.after(200, lambda: self._navigate_to_directory(target))
+
+    def _action_quick_compress(self, target: Path) -> None:
+        """Quickly compress target into <target>.blitz without modal prompt."""
+        target = target.resolve()
+        if not target.exists():
+            return
+
+        out_archive = target.with_suffix(".blitz") if target.is_file() else target.parent / f"{target.name}.blitz"
+        if out_archive.exists():
+            counter = 1
+            while True:
+                candidate = target.parent / f"{target.stem} ({counter}).blitz"
+                if not candidate.exists():
+                    out_archive = candidate
+                    break
+                counter += 1
+
+        level, workers = self._get_sidebar_settings()
+
+        self._active_job = True
+        self._cancel_event = threading.Event()
+        self.btn_cancel_job.pack(fill="x", pady=(6, 0))
+        self.prog_bar["value"] = 0
+        self.lbl_perf_op.configure(text=f"⚡ Compressing {target.name}...")
+        self.lbl_perf_ticker.configure(text=f"Creating: {out_archive.name}")
+        self.lbl_perf_metrics.configure(text=f"Profile: Level {level} • {workers} Workers")
+
+        def on_progress(p: ProgressUpdate) -> None:
+            if p.total_bytes > 0:
+                speed_mb = p.current_speed_bps / (1024 * 1024)
+                pct = (p.bytes_processed / p.total_bytes) * 100
+                self.after(0, lambda: self._update_perf_progress(pct, speed_mb, p.phase, p.bytes_processed, p.total_bytes))
+
+        def worker_thread() -> None:
+            try:
+                res: CompressionResult = compress(
+                    input_path=target,
+                    output_path=out_archive,
+                    level=level,
+                    workers=workers,
+                    cancel_event=self._cancel_event,
+                    progress_callback=on_progress,
+                )
+                self.after(0, lambda: self._show_compress_scorecard(res))
+                self.after(0, self._action_refresh)
+            except BlitzCancelled:
+                self.after(0, lambda: self.lbl_perf_op.configure(text="⚠️ Compression Cancelled"))
+                self.after(0, lambda: self.lbl_perf_ticker.configure(text="Pipeline halted cleanly"))
+            except Exception as ex:
+                err_msg = str(ex)[:40]
+                self.after(0, lambda m=err_msg: self.lbl_perf_op.configure(text=f"❌ Error: {m}"))
+            finally:
+                self._active_job = False
+                self._cancel_event = None
+                self.after(0, self.btn_cancel_job.pack_forget)
+
+        threading.Thread(target=worker_thread, daemon=True).start()
+
+    def _toggle_shell_integration(self) -> None:
+        """Toggle Windows Explorer right-click context menu integration."""
+        is_reg = is_shell_context_menu_registered()
+        if is_reg:
+            if messagebox.askyesno(
+                "Windows Shell Integration",
+                "BlitzPack Explorer context menus are currently ENABLED.\n\n"
+                "Would you like to remove BlitzPack from the Windows Explorer right-click menu?"
+            ):
+                if unregister_shell_context_menu():
+                    messagebox.showinfo("Windows Shell Integration", "Context menus successfully removed.")
+                else:
+                    messagebox.showerror("Error", "Failed to remove registry keys.")
+        else:
+            if messagebox.askyesno(
+                "Windows Shell Integration",
+                "Enable BlitzPack WinRAR-style right-click context menus in Windows Explorer?\n\n"
+                "This allows you to:\n"
+                "• Right-click any file/folder to compress\n"
+                "• Right-click any archive (.blitz, .rar, .zip, .7z, .tar, etc.) to extract"
+            ):
+                if register_shell_context_menu():
+                    messagebox.showinfo("Windows Shell Integration", "Context menus successfully registered!")
+                else:
+                    messagebox.showerror("Error", "Failed to register context menus.")
 
     def _on_close(self) -> None:
         if self._cancel_event:
@@ -648,8 +773,8 @@ class BlitzPackMainWindow(tk.Tk):
         if not valid_paths:
             return
 
-        # If single .blitz archive dropped, open or inspect it
-        if len(valid_paths) == 1 and valid_paths[0].is_file() and valid_paths[0].suffix.lower() == ".blitz":
+        # If single archive dropped, open or inspect it
+        if len(valid_paths) == 1 and valid_paths[0].is_file() and is_supported_archive(valid_paths[0]):
             self._open_archive(valid_paths[0])
             return
 
@@ -782,6 +907,8 @@ class BlitzPackMainWindow(tk.Tk):
         menu_commands.add_command(label="Test Integrity", accelerator="Alt+T", command=self._action_test_archive)
         menu_commands.add_separator()
         menu_commands.add_command(label="Delete", accelerator="Del", command=self._action_delete_async)
+        menu_commands.add_separator()
+        menu_commands.add_command(label="Windows Shell Integration...", command=self._toggle_shell_integration)
 
         menu_help = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=menu_help)
@@ -1223,12 +1350,11 @@ class BlitzPackMainWindow(tk.Tk):
                         is_dir = entry.is_dir()
                         size = stat.st_size if not is_dir else 0
                         mtime_str = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-                        ext = Path(entry.name).suffix.lower()
                         _, item_type = get_file_icon_and_badge(entry.name, is_dir)
 
                         self.displayed_items.append({
                             "name": entry.name, "is_dir": is_dir, "is_up": False,
-                            "is_archive": ext == ".blitz", "size_bytes": size, "packed_bytes": 0,
+                            "is_archive": is_supported_archive(entry.name), "size_bytes": size, "packed_bytes": 0,
                             "type": item_type, "modified": mtime_str, "path": Path(entry.path),
                         })
                     except (PermissionError, OSError):
@@ -1246,14 +1372,12 @@ class BlitzPackMainWindow(tk.Tk):
             return
 
         try:
-            # Read manifest into memory and close handle immediately!
-            with open(archive_path, "rb") as f_in:
-                reader = BlitzArchiveReader(f_in)
-                manifest_entries = list(reader.manifest)
+            manifest_entries = inspect_archive(archive_path)
         except Exception as ex:
-            messagebox.showerror("Invalid Archive", f"Failed to open .blitz archive:\n{str(ex)}")
+            messagebox.showerror("Invalid Archive", f"Failed to open archive:\n{str(ex)}")
             return
 
+        fmt_label = get_archive_format(archive_path).upper()
         self.mode = "archive"
         self.current_archive_path = archive_path
         self.archive_manifest = manifest_entries
@@ -1267,7 +1391,7 @@ class BlitzPackMainWindow(tk.Tk):
         self.ent_address.delete(0, tk.END)
         self.ent_address.insert(0, str(archive_path) + (f"\\{self.archive_virtual_subpath}" if self.archive_virtual_subpath else ""))
         self.title(f"⚡ BlitzPack - [{display_path}]")
-        self.lbl_status_mode.configure(text="[Archive Browser]", foreground="#FFAA00")
+        self.lbl_status_mode.configure(text=f"[{fmt_label} Browser]", foreground="#FFAA00")
 
         self.lbl_perf_op.configure(text=f"Archive: {archive_path.name}")
         self.lbl_perf_ticker.configure(
@@ -1476,7 +1600,7 @@ class BlitzPackMainWindow(tk.Tk):
         typed_path = Path(self.ent_address.get().strip()).resolve()
         if typed_path.is_dir():
             self._navigate_to_directory(typed_path)
-        elif typed_path.is_file() and typed_path.suffix.lower() == ".blitz":
+        elif typed_path.is_file() and is_supported_archive(typed_path):
             self._open_archive(typed_path)
         else:
             messagebox.showerror("Error", f"Path does not exist: {typed_path}")
@@ -1568,7 +1692,9 @@ class BlitzPackMainWindow(tk.Tk):
             text=f"⚡ {res.throughput_mb_s:.1f} MB/s • {res.compression_ratio:.2f}x Ratio (Saved {saved_pct}%)"
         )
 
-    def _action_extract_to(self, specific_archive: Optional[Path] = None) -> None:
+    def _action_extract_to(
+        self, specific_archive: Optional[Path] = None, dest_override: Optional[Path] = None
+    ) -> None:
         archive_path: Optional[Path] = None
 
         if specific_archive:
@@ -1579,23 +1705,26 @@ class BlitzPackMainWindow(tk.Tk):
             selection = self.tree.selection()
             selected_items = [i for i in self.displayed_items if i.get("tree_id") in selection and not i.get("is_up")]
             for item in selected_items:
-                if item.get("is_archive") or item.get("path", Path()).suffix.lower() == ".blitz":
+                if item.get("is_archive") or is_supported_archive(item.get("path", Path())):
                     archive_path = item["path"]
                     break
 
         if not archive_path or not archive_path.exists():
-            messagebox.showinfo("Extract", "Please select a .blitz archive or open one to extract.")
+            messagebox.showinfo("Extract", "Please select an archive or open one to extract.")
             return
 
-        dest_folder = archive_path.parent / archive_path.stem
-        if dest_folder.exists():
-            counter = 1
-            while True:
-                candidate = archive_path.parent / f"{archive_path.stem} ({counter})"
-                if not candidate.exists():
-                    dest_folder = candidate
-                    break
-                counter += 1
+        if dest_override:
+            dest_folder = dest_override
+        else:
+            dest_folder = archive_path.parent / archive_path.stem
+            if dest_folder.exists():
+                counter = 1
+                while True:
+                    candidate = archive_path.parent / f"{archive_path.stem} ({counter})"
+                    if not candidate.exists():
+                        dest_folder = candidate
+                        break
+                    counter += 1
 
         _, workers = self._get_sidebar_settings()
 
@@ -1656,12 +1785,12 @@ class BlitzPackMainWindow(tk.Tk):
             selection = self.tree.selection()
             selected_items = [i for i in self.displayed_items if i.get("tree_id") in selection and not i.get("is_up")]
             for item in selected_items:
-                if item.get("is_archive") or item.get("path", Path()).suffix.lower() == ".blitz":
+                if item.get("is_archive") or is_supported_archive(item.get("path", Path())):
                     archive_path = item["path"]
                     break
 
         if not archive_path or not archive_path.exists():
-            messagebox.showinfo("Test Archive", "Please select a .blitz archive to test.")
+            messagebox.showinfo("Test Archive", "Please select an archive to test.")
             return
 
         self._active_job = True
@@ -1670,15 +1799,17 @@ class BlitzPackMainWindow(tk.Tk):
 
         def worker_thread() -> None:
             try:
-                with open(sanitize_windows_path(archive_path), "rb") as f_in:
-                    reader = BlitzArchiveReader(f_in)
-                    reader.verify(deep=False)
-
-                self.after(0, lambda: self.lbl_perf_op.configure(text="🛡️ Verified 100% (Zero Corruption)"))
-                self.after(0, lambda: self.lbl_perf_metrics.configure(text="xxHash64 Whole-Archive & Seek Table Valid"))
-                self.after(0, lambda: self.prog_bar.configure(value=100))
+                ok, msg = test_archive(archive_path)
+                if ok:
+                    self.after(0, lambda: self.lbl_perf_op.configure(text="🛡️ Verified 100% (Zero Corruption)"))
+                    self.after(0, lambda m=msg: self.lbl_perf_metrics.configure(text=m))
+                    self.after(0, lambda: self.prog_bar.configure(value=100))
+                else:
+                    self.after(0, lambda: self.lbl_perf_op.configure(text="❌ Test Failed!"))
+                    self.after(0, lambda m=msg: self.lbl_perf_metrics.configure(text=m))
+                    self.after(0, lambda: self.prog_bar.configure(value=0))
             except Exception as ex:
-                err_msg = str(ex)[:30]
+                err_msg = str(ex)[:40]
                 self.after(0, lambda m=err_msg: self.lbl_perf_op.configure(text=f"❌ Test Failed: {m}"))
             finally:
                 self._active_job = False
@@ -1756,8 +1887,22 @@ class BlitzPackMainWindow(tk.Tk):
 
     def _action_open_archive_dialog(self) -> None:
         chosen = filedialog.askopenfilename(
-            title="Open BlitzPack Archive",
-            filetypes=[("BlitzPack Archives", "*.blitz"), ("All Files", "*.*")]
+            title="Open Archive (BlitzPack, RAR, ZIP, 7-Zip, TAR)",
+            filetypes=[
+                (
+                    "All Supported Archives",
+                    "*.blitz;*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.bz2;*.xz;*.cbz;*.cbr;*.cb7;*.jar;*.war",
+                ),
+                ("BlitzPack Archives (*.blitz)", "*.blitz"),
+                ("ZIP Archives (*.zip, *.cbz, *.jar, *.war)", "*.zip;*.cbz;*.jar;*.war"),
+                ("RAR Archives (*.rar, *.cbr)", "*.rar;*.cbr"),
+                ("7-Zip Archives (*.7z, *.cb7)", "*.7z;*.cb7"),
+                (
+                    "TAR & Compressed Streams (*.tar, *.tar.gz, *.tgz, *.tar.bz2, *.tar.xz, *.gz, *.bz2, *.xz)",
+                    "*.tar;*.tar.gz;*.tgz;*.tar.bz2;*.tbz2;*.tar.xz;*.txz;*.gz;*.bz2;*.xz",
+                ),
+                ("All Files (*.*)", "*.*"),
+            ],
         )
         if chosen:
             self._open_archive(Path(chosen))

@@ -18,6 +18,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import winreg
 
+from blitzpack.shell_integration import register_shell_context_menu
+
 try:
     import sv_ttk
     HAS_SV_TTK = True
@@ -216,8 +218,17 @@ def register_uninstaller(install_dir: str) -> None:
         bat_content = f"""@echo off
 title Uninstalling {APP_NAME}...
 echo Uninstalling {APP_NAME}...
+echo Removing Windows Explorer context menu integration...
+reg delete "HKCU\\Software\\Classes\\*\\shell\\BlitzPack" /f 2>nul
+reg delete "HKCU\\Software\\Classes\\Directory\\shell\\BlitzPack" /f 2>nul
+reg delete "HKCU\\Software\\Classes\\BlitzPack.Archive" /f 2>nul
+reg delete "HKCU\\Software\\Classes\\.blitz" /f 2>nul
+for %%E in (zip rar 7z tar gz bz2 xz tgz tbz2 txz cbz cbr cb7 jar war) do (
+    reg delete "HKCU\\Software\\Classes\\SystemFileAssociations\\.%%E\\shell\\BlitzPack" /f 2>nul
+)
 del /f /q "{desktop_lnk}" 2>nul
 del /f /q "{start_lnk}" 2>nul
+reg delete "HKCU\\Software\\Classes\\SystemFileAssociations\\.blitz" /f 2>nul
 reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{APP_NAME}" /f 2>nul
 echo Cleaning files...
 start /b "" cmd /c timeout /t 2 ^& rd /s /q "{install_dir}"
@@ -235,6 +246,7 @@ def perform_installation(
     create_start_menu: bool,
     add_path: bool,
     add_defender: bool,
+    add_shell_menu: bool = True,
     progress_callback=None,
 ) -> tuple[bool, str]:
     """Execute full installation workflow."""
@@ -260,26 +272,30 @@ def perform_installation(
             shutil.copy2(gui_src, gui_dst)
 
         if create_desktop_shortcut:
-            log("Creating Desktop shortcut...", 65)
+            log("Creating Desktop shortcut...", 60)
             desktop_dir = get_desktop_dir()
             if os.path.exists(gui_dst):
                 create_shortcut(gui_dst, os.path.join(desktop_dir, f"{APP_NAME}.lnk"), "BlitzPack High-Speed Archiver")
 
         if create_start_menu:
-            log("Creating Start Menu entry...", 75)
+            log("Creating Start Menu entry...", 70)
             start_dir = get_start_menu_dir()
             if os.path.exists(gui_dst):
                 create_shortcut(gui_dst, os.path.join(start_dir, f"{APP_NAME}.lnk"), "BlitzPack High-Speed Archiver")
 
+        if add_shell_menu:
+            log("Configuring Windows Explorer context menus...", 80)
+            register_shell_context_menu(target_dir)
+
         if add_path:
-            log("Registering CLI in User PATH...", 85)
+            log("Registering CLI in User PATH...", 88)
             add_to_user_path(target_dir)
 
         if add_defender:
-            log("Configuring Windows Defender exclusion (Max Speed)...", 92)
+            log("Configuring Windows Defender exclusion (Max Speed)...", 94)
             apply_defender_exclusion(target_dir)
 
-        log("Registering uninstaller...", 96)
+        log("Registering uninstaller...", 98)
         register_uninstaller(target_dir)
 
         log("Installation Complete!", 100)
@@ -306,6 +322,7 @@ class InstallerGUI:
         self.license_agree_var = tk.StringVar(value="agree")
         self.desktop_var = tk.BooleanVar(value=True)
         self.start_menu_var = tk.BooleanVar(value=True)
+        self.shell_menu_var = tk.BooleanVar(value=True)
         self.path_var = tk.BooleanVar(value=True)
         self.defender_var = tk.BooleanVar(value=True)
         self.launch_after_var = tk.BooleanVar(value=True)
@@ -458,6 +475,12 @@ class InstallerGUI:
 
         ttk.Checkbutton(
             self.content_container,
+            text="Add Windows Explorer context menu (Right-click to compress/extract)",
+            variable=self.shell_menu_var,
+        ).pack(anchor=tk.W, pady=2)
+
+        ttk.Checkbutton(
+            self.content_container,
             text="Add BlitzPack CLI to user PATH (enables 'blitzpack' in any terminal)",
             variable=self.path_var,
         ).pack(anchor=tk.W, pady=2)
@@ -488,6 +511,7 @@ class InstallerGUI:
         lines = [
             f"• Install Destination:\n   {self.target_dir_var.get()}",
             "• Shortcuts to Create:" + (" Desktop" if self.desktop_var.get() else "") + (" Start Menu" if self.start_menu_var.get() else ""),
+            "• Explorer Context Menu: " + ("Enabled (WinRAR style)" if self.shell_menu_var.get() else "Disabled"),
             "• System PATH Registration: " + ("Enabled" if self.path_var.get() else "Disabled"),
             "• Windows Defender Exclusion: " + ("Enabled (Max Turbo)" if self.defender_var.get() else "Disabled"),
         ]
@@ -542,6 +566,7 @@ class InstallerGUI:
             create_start_menu=self.start_menu_var.get(),
             add_path=self.path_var.get(),
             add_defender=self.defender_var.get(),
+            add_shell_menu=self.shell_menu_var.get(),
             progress_callback=on_prog,
         )
 
@@ -639,6 +664,7 @@ def main() -> None:
     parser.add_argument("--no-start", action="store_true", help="Do not create start menu shortcut")
     parser.add_argument("--no-path", action="store_true", help="Do not add to user PATH")
     parser.add_argument("--no-defender", action="store_true", help="Do not apply Windows Defender exclusion")
+    parser.add_argument("--no-shell-menu", action="store_true", help="Do not register Windows Explorer context menus")
     args = parser.parse_args()
 
     if args.silent:
@@ -649,6 +675,7 @@ def main() -> None:
             create_start_menu=not args.no_start,
             add_path=not args.no_path,
             add_defender=not args.no_defender,
+            add_shell_menu=not args.no_shell_menu,
             progress_callback=lambda msg, pct: print(f"[{pct}%] {msg}"),
         )
         if success:
