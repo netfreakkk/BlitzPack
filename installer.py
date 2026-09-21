@@ -271,6 +271,13 @@ def perform_installation(
         if os.path.exists(gui_src):
             shutil.copy2(gui_src, gui_dst)
 
+        ico_src = get_payload_path("blitzpack.ico")
+        if os.path.exists(ico_src):
+            shutil.copy2(ico_src, os.path.join(target_dir, "blitzpack.ico"))
+        png_src = get_payload_path("blitzpack.png")
+        if os.path.exists(png_src):
+            shutil.copy2(png_src, os.path.join(target_dir, "blitzpack.png"))
+
         if create_desktop_shortcut:
             log("Creating Desktop shortcut...", 60)
             desktop_dir = get_desktop_dir()
@@ -317,6 +324,15 @@ class InstallerGUI:
         if HAS_SV_TTK:
             sv_ttk.set_theme("dark")
 
+        # Configure AppUserModelID for Windows Taskbar icon grouping
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BlitzPack.Installer.1.0.0")
+            except Exception:
+                pass
+
+        self._set_app_icon()
+
         # Installation settings
         self.target_dir_var = tk.StringVar(value=DEFAULT_INSTALL_DIR)
         self.license_agree_var = tk.StringVar(value="agree")
@@ -332,6 +348,22 @@ class InstallerGUI:
 
         self._build_shell()
         self._show_step(0)
+
+    def _set_app_icon(self) -> None:
+        """Apply high-resolution multi-format icon to installer window."""
+        try:
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            for cand in [os.path.join(base, "assets", "blitzpack.ico"), os.path.join(base, "blitzpack.ico")]:
+                if os.path.isfile(cand):
+                    self.root.iconbitmap(default=cand)
+                    break
+            for cand in [os.path.join(base, "assets", "blitzpack.png"), os.path.join(base, "blitzpack.png")]:
+                if os.path.isfile(cand):
+                    self._icon_photo = tk.PhotoImage(file=cand)
+                    self.root.iconphoto(False, self._icon_photo)
+                    break
+        except Exception:
+            pass
 
     def _build_shell(self) -> None:
         self.header_frame = ttk.Frame(self.root, padding=(24, 16, 24, 12))

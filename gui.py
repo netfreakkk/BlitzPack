@@ -574,7 +574,16 @@ class BlitzPackMainWindow(tk.Tk):
         self._hwnd: Optional[int] = None
         self._old_wndproc: Optional[int] = None
         self._wndproc_ref: Any = None
+        self._icon_photo: Any = None
 
+        # Configure AppUserModelID for Windows Taskbar icon grouping
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BlitzPack.Archiver.1.0.0")
+            except Exception:
+                pass
+
+        self._set_app_icon()
         self._build_ui()
         self._apply_theme_styling(is_dark=True)
         self._setup_native_drag_and_drop()
@@ -582,6 +591,22 @@ class BlitzPackMainWindow(tk.Tk):
         self._start_graph_heartbeat()
         self._handle_cli_launch_args()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _set_app_icon(self) -> None:
+        """Load and apply high-resolution multi-format BlitzPack app icon."""
+        try:
+            base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+            for cand in [base / "assets" / "blitzpack.ico", base / "blitzpack.ico"]:
+                if cand.is_file():
+                    self.iconbitmap(default=str(cand))
+                    break
+            for cand in [base / "assets" / "blitzpack.png", base / "blitzpack.png"]:
+                if cand.is_file():
+                    self._icon_photo = tk.PhotoImage(file=str(cand))
+                    self.iconphoto(False, self._icon_photo)
+                    break
+        except Exception:
+            pass
 
     def _handle_cli_launch_args(self) -> None:
         """Process CLI arguments when launched from Windows Explorer context menu."""

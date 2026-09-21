@@ -97,6 +97,12 @@ def register_shell_context_menu(install_dir: Optional[str] = None) -> bool:
     try:
         gui_target = resolve_gui_executable(install_dir)
         gui_icon = gui_target if gui_target.endswith(".exe") else sys.executable
+        if install_dir and os.path.isfile(os.path.join(install_dir, "blitzpack.ico")):
+            gui_icon = os.path.join(install_dir, "blitzpack.ico")
+        else:
+            dev_ico = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "blitzpack.ico")
+            if os.path.isfile(dev_ico):
+                gui_icon = dev_ico
 
         # ---------------------------------------------------------------------
         # 1. Right-Click on ANY File (*) or Directory (Directory)
