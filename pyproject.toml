@@ -22,13 +22,15 @@ dependencies = [
     "zstandard>=0.23.0",
     "xxhash>=3.4.0",
     "msgpack>=1.0.0",
+    "py7zr>=0.20.0",
+    "rarfile>=4.0",
 ]
 
 [project.optional-dependencies]
 cli = ["rich>=13.0.0"]
 gui = ["sv-ttk>=2.6", "psutil>=5.9.0"]
-dev = ["pytest>=8.0.0"]
-all = ["rich>=13.0.0", "sv-ttk>=2.6", "psutil>=5.9.0", "pytest>=8.0.0"]
+dev = ["pytest>=8.0.0", "py7zr>=0.20.0", "rarfile>=4.0"]
+all = ["rich>=13.0.0", "sv-ttk>=2.6", "psutil>=5.9.0", "py7zr>=0.20.0", "rarfile>=4.0", "pytest>=8.0.0"]
 
 [project.scripts]
 blitzpack = "cli:main"

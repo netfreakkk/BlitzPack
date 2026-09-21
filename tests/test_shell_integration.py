@@ -6,6 +6,9 @@ import sys
 
 import pytest
 
+if sys.platform != "win32":
+    pytest.skip("Windows Explorer Shell integration requires Windows", allow_module_level=True)
+
 from blitzpack.shell_integration import (
     is_shell_context_menu_registered,
     register_shell_context_menu,
@@ -13,7 +16,6 @@ from blitzpack.shell_integration import (
 )
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows Explorer Shell integration requires Windows")
 def test_shell_context_menu_registration_cycle():
     # 1. Register context menu
     registered = register_shell_context_menu()

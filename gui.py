@@ -66,7 +66,10 @@ HWND = ctypes.c_void_p
 UINT = ctypes.c_uint
 WPARAM = ctypes.c_void_p
 LPARAM = ctypes.c_void_p
-WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
+if sys.platform == "win32" and hasattr(ctypes, "WINFUNCTYPE"):
+    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
+else:
+    WNDPROC = ctypes.CFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

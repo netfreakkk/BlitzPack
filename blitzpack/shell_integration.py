@@ -10,22 +10,33 @@ import ctypes
 import os
 import sys
 from typing import List, Optional
-import winreg
+
+try:
+    import winreg
+    REG_ROOT = winreg.HKEY_CURRENT_USER
+    REG_SZ = winreg.REG_SZ
+except ImportError:
+    winreg = None  # type: ignore
+    REG_ROOT = None  # type: ignore
+    REG_SZ = 1  # type: ignore
 
 from .multi_decompress import SUPPORTED_ARCHIVE_EXTENSIONS
 
-REG_ROOT = winreg.HKEY_CURRENT_USER
 CLASSES_SUB = r"Software\Classes"
 
 
-def _set_reg_value(hkey: int, subkey: str, name: str, value: str, reg_type: int = winreg.REG_SZ) -> None:
+def _set_reg_value(hkey: Optional[int], subkey: str, name: str, value: str, reg_type: int = REG_SZ) -> None:
     """Recursively create subkey path and set string/expand string value."""
+    if winreg is None or hkey is None:
+        return
     with winreg.CreateKey(hkey, subkey) as key:
         winreg.SetValueEx(key, name, 0, reg_type, value)
 
 
-def _delete_reg_key_tree(hkey: int, subkey: str) -> None:
+def _delete_reg_key_tree(hkey: Optional[int], subkey: str) -> None:
     """Recursively delete a registry key and all its subkeys."""
+    if winreg is None or hkey is None:
+        return
     try:
         with winreg.OpenKey(hkey, subkey, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
             while True:
@@ -43,6 +54,8 @@ def _delete_reg_key_tree(hkey: int, subkey: str) -> None:
 
 def _notify_shell() -> None:
     """Notify Windows Shell that file associations have changed."""
+    if sys.platform != "win32":
+        return
     try:
         SHCNE_ASSOCCHANGED = 0x08000000
         SHCNF_IDLIST = 0x0000
@@ -53,6 +66,8 @@ def _notify_shell() -> None:
 
 def resolve_gui_executable(install_dir: Optional[str] = None) -> str:
     """Determine the command line target for blitzpack-gui."""
+    if sys.platform != "win32":
+        return ""
     if install_dir:
         exe_path = os.path.join(install_dir, "blitzpack-gui.exe")
         if os.path.isfile(exe_path):
@@ -77,6 +92,8 @@ def resolve_gui_executable(install_dir: Optional[str] = None) -> str:
 
 def register_shell_context_menu(install_dir: Optional[str] = None) -> bool:
     """Register BlitzPack WinRAR-style context menus in Windows File Explorer."""
+    if sys.platform != "win32" or winreg is None:
+        return False
     try:
         gui_target = resolve_gui_executable(install_dir)
         gui_icon = gui_target if gui_target.endswith(".exe") else sys.executable
@@ -150,6 +167,8 @@ def register_shell_context_menu(install_dir: Optional[str] = None) -> bool:
 
 def unregister_shell_context_menu() -> bool:
     """Remove BlitzPack context menus and file associations from Windows Registry."""
+    if sys.platform != "win32" or winreg is None:
+        return False
     try:
         _delete_reg_key_tree(REG_ROOT, f"{CLASSES_SUB}\\*\\shell\\BlitzPack")
         _delete_reg_key_tree(REG_ROOT, f"{CLASSES_SUB}\\Directory\\shell\\BlitzPack")
@@ -168,6 +187,8 @@ def unregister_shell_context_menu() -> bool:
 
 def is_shell_context_menu_registered() -> bool:
     """Check if BlitzPack Explorer context menu is currently registered."""
+    if sys.platform != "win32" or winreg is None:
+        return False
     try:
         with winreg.OpenKey(REG_ROOT, f"{CLASSES_SUB}\\*\\shell\\BlitzPack"):
             return True
