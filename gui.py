@@ -1769,7 +1769,9 @@ class BlitzPackMainWindow(tk.Tk):
             if p.total_bytes > 0:
                 speed_mb = p.current_speed_bps / (1024 * 1024)
                 pct = (p.bytes_processed / p.total_bytes) * 100
-                self.after(0, lambda: self._update_perf_progress(pct, speed_mb, "Extracting", p.bytes_processed, p.total_bytes))
+                cur_file = Path(p.current_file).name if getattr(p, "current_file", None) else ""
+                phase_label = f"Extracting {cur_file}" if cur_file else "Extracting"
+                self.after(0, lambda: self._update_perf_progress(pct, speed_mb, phase_label, p.bytes_processed, p.total_bytes))
 
         def worker_thread() -> None:
             try:
@@ -1786,8 +1788,9 @@ class BlitzPackMainWindow(tk.Tk):
                 self.after(0, lambda: self.lbl_perf_op.configure(text="⚠️ Extraction Cancelled"))
                 self.after(0, lambda: self.lbl_perf_ticker.configure(text="Pipeline halted cleanly"))
             except Exception as ex:
-                err_msg = str(ex)[:40]
-                self.after(0, lambda m=err_msg: self.lbl_perf_op.configure(text=f"❌ Error: {m}"))
+                err_msg = str(ex)
+                self.after(0, lambda m=err_msg[:40]: self.lbl_perf_op.configure(text=f"❌ Error: {m}"))
+                self.after(0, lambda: messagebox.showerror("Extraction Error", f"Failed to extract {archive_path.name}:\n\n{err_msg}"))
             finally:
                 self._active_job = False
                 self._cancel_event = None

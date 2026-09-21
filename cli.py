@@ -135,11 +135,12 @@ def handle_decompress(args: argparse.Namespace) -> None:
 
         def on_progress(update: ProgressUpdate):
             if update.total_bytes > 0:
+                cur = f" [{Path(update.current_file).name}]" if getattr(update, "current_file", None) else ""
                 progress.update(
                     task_id,
                     completed=update.bytes_processed,
                     total=update.total_bytes,
-                    description=f"Extracting ({format_throughput(update.current_speed_bps, 1.0)})..."
+                    description=f"Extracting{cur} ({format_throughput(update.current_speed_bps, 1.0)})..."
                 )
 
         res = decompress(
@@ -249,11 +250,12 @@ def handle_list(args: argparse.Namespace) -> None:
         for entry in entries:
             type_str = type_names.get(entry.file_type, "?")
             total_size += entry.size
+            packed = getattr(entry, "packed_size", 0)
             table.add_row(
                 type_str,
                 entry.path,
                 format_bytes(entry.size) if entry.file_type == 0 else "-",
-                format_bytes(entry.packed_size) if entry.packed_size > 0 else "-"
+                format_bytes(packed) if packed > 0 else "-"
             )
 
         console.print(table)

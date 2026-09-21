@@ -17,6 +17,7 @@ class ProgressUpdate:
     total_bytes: int
     current_speed_bps: float
     message: str = ""
+    current_file: str = ""
 
 
 ProgressCallback = Callable[[ProgressUpdate], None]

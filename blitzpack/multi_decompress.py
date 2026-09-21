@@ -105,19 +105,48 @@ def _configure_rarfile_backend() -> None:
     if not HAS_RARFILE:
         return
 
-    candidates = [
-        os.path.join(getattr(sys, "_MEIPASS", ""), "blitzpack", "tools", "UnRAR.exe"),
-        os.path.join(getattr(sys, "_MEIPASS", ""), "tools", "UnRAR.exe"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "UnRAR.exe"),
+    candidates: List[str] = []
+
+    # 1. Check PyInstaller _MEIPASS if bundled in standalone binary
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.extend([
+            os.path.join(meipass, "blitzpack", "tools", "UnRAR.exe"),
+            os.path.join(meipass, "tools", "UnRAR.exe"),
+            os.path.join(meipass, "UnRAR.exe"),
+        ])
+
+    # 2. Check application directory (where executable or script resides)
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_dir = os.path.dirname(pkg_dir)
+
+    candidates.extend([
+        os.path.join(pkg_dir, "tools", "UnRAR.exe"),
+        os.path.join(repo_dir, "blitzpack", "tools", "UnRAR.exe"),
+        os.path.join(repo_dir, "tools", "UnRAR.exe"),
+        os.path.join(exe_dir, "tools", "UnRAR.exe"),
+        os.path.join(exe_dir, "UnRAR.exe"),
+    ])
+
+    # 3. Standard Windows system locations
+    candidates.extend([
         r"C:\Program Files\WinRAR\UnRAR.exe",
+        r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
+        r"C:\Program Files\WinRAR\WinRAR.exe",
         r"C:\Program Files\7-Zip\7z.exe",
-        shutil.which("unrar"),
-        shutil.which("7z"),
-    ]
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ])
+
+    # 4. PATH lookups
+    for tool_name in ("UnRAR.exe", "unrar.exe", "unrar", "7z.exe", "7z"):
+        found = shutil.which(tool_name)
+        if found:
+            candidates.append(found)
 
     for cand in candidates:
         if cand and os.path.isfile(cand):
-            rarfile.UNRAR_TOOL = cand
+            rarfile.UNRAR_TOOL = os.path.abspath(cand)
             return
 
 

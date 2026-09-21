@@ -198,3 +198,56 @@ def test_zip_slip_protection(tmp_path: Path):
     res = extract_archive(zip_file, out_dir)
     assert res.total_files == 0
     assert not (tmp_path / "evil.txt").exists()
+
+
+SAMPLE_RAR_B64 = (
+    "UmFyIRoHAQDz4YLrCwEFBwAGAQGAgIAAFZWne1QCAwvsAwSaBiAovdk3gAMAOFVzZXJzL3NvdXJhL0Rvd25sb2Fkcy9"
+    "QYXJhbGxlbFJBUi9ibGl0enBhY2svY29uc3RhbnRzLnB5CgMCW4hgepZG3QHMf+gBN1VUMzL0Z1XvEjwfFL0gJUCw"
+    "EI6CiUljAiscgnIIEdMj+GOtkceNPG7VL74K3XMcYWhb4m5FG858N81vjnkW+ZnP4D8lrp14xgwYNM0Na5FWW0z09"
+    "Co2UtshpsaqVlZxoha2eWeOGyckKI5TNjmKy2hKr0+XyHzUcWrUcuk/CEIZxnLRnUeO5iUZDiWXNqUImEpWwvoaN/W"
+    "uvZckbL0l3Olbg8ctwpf9KL8DsMm8Xd1QJILdxEQAh84E5vp9s/Pr05fy8rlV7VehXJ68P97X9cQ0pxQX3x5Uw853"
+    "R6DLqDixDexg6Zradqv0yJom4xMyZnterFB83tXiqXYawuwpiLWRyq5NloHUhsplMa3MwM0ORXuxwqP4vxrvWH3n8b"
+    "0GlFnvEXbRw1JfXlVRebUTriEJkG8yLfklebtSWxpNz6vkJDd7S4ooLnpXWZeGTzppUTOYL5QJBswvoyrNou9kfz3K"
+    "UeXPmPqD5BzhsHu77n7uuvh++Jc/RPERXfyfgM8YXNJh5ccqS5rHPyTg9vrA9m0YsiP7Jdt9yYff/u0+K6I/jVBif"
+    "CCzIRf3LdQjUMEhHS3c537gpDfRr++iDnu2N7MKvC67HUINq0T7GUISdfAtR+x21irSF+QZu1WX1aHYSVdkcyZRNd"
+    "Add1ZRAwUEAA=="
+)
+
+
+def test_rar_inspect_test_and_extract(tmp_path: Path):
+    try:
+        import rarfile
+        from blitzpack.multi_decompress import _configure_rarfile_backend
+        _configure_rarfile_backend()
+        if not getattr(rarfile, "UNRAR_TOOL", None) or not Path(rarfile.UNRAR_TOOL).is_file():
+            pytest.skip("UnRAR tool not available on this system")
+    except ImportError:
+        pytest.skip("rarfile not installed")
+
+    import base64
+    from blitzpack.utils import ProgressUpdate
+
+    rar_data = base64.b64decode(SAMPLE_RAR_B64)
+    rar_file = tmp_path / "sample.rar"
+    rar_file.write_bytes(rar_data)
+
+    # 1. Inspect
+    manifest = inspect_archive(rar_file)
+    assert len(manifest) >= 1
+    assert any("constants.py" in e.path for e in manifest)
+
+    # 2. Test integrity
+    ok, err = check_archive(rar_file)
+    assert ok is True
+
+    # 3. Extract with progress_callback
+    progress_updates: list[ProgressUpdate] = []
+    def on_progress(p: ProgressUpdate) -> None:
+        progress_updates.append(p)
+
+    out_dir = tmp_path / "rar_out"
+    res = decompress(rar_file, out_dir, progress_callback=on_progress)
+    assert res.total_files >= 1
+    assert len(progress_updates) >= 1
+    assert progress_updates[-1].current_file != ""
+    assert (out_dir / manifest[0].path).exists()

@@ -278,6 +278,17 @@ def perform_installation(
         if os.path.exists(png_src):
             shutil.copy2(png_src, os.path.join(target_dir, "blitzpack.png"))
 
+        unrar_src = get_payload_path("UnRAR.exe")
+        if not os.path.exists(unrar_src):
+            unrar_src = os.path.join(getattr(sys, "_MEIPASS", ""), "tools", "UnRAR.exe")
+        if not os.path.exists(unrar_src):
+            unrar_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blitzpack", "tools", "UnRAR.exe")
+        if os.path.exists(unrar_src):
+            tools_dir = os.path.join(target_dir, "tools")
+            os.makedirs(tools_dir, exist_ok=True)
+            shutil.copy2(unrar_src, os.path.join(tools_dir, "UnRAR.exe"))
+            shutil.copy2(unrar_src, os.path.join(target_dir, "UnRAR.exe"))
+
         if create_desktop_shortcut:
             log("Creating Desktop shortcut...", 60)
             desktop_dir = get_desktop_dir()
