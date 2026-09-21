@@ -144,10 +144,30 @@ def _configure_rarfile_backend() -> None:
         if found:
             candidates.append(found)
 
+    # On POSIX (Linux/macOS), do not consider Windows .exe files
+    is_win = sys.platform == "win32"
+
     for cand in candidates:
-        if cand and os.path.isfile(cand):
-            rarfile.UNRAR_TOOL = os.path.abspath(cand)
+        if not cand or not os.path.isfile(cand):
+            continue
+        if not is_win and cand.lower().endswith(".exe"):
+            continue
+
+        cand_abs = os.path.abspath(cand)
+        basename = os.path.basename(cand_abs).lower()
+
+        if "7z" in basename:
+            rarfile.SEVENZIP_TOOL = cand_abs
+        elif "unar" in basename:
+            rarfile.UNAR_TOOL = cand_abs
+        else:
+            rarfile.UNRAR_TOOL = cand_abs
+
+        try:
+            rarfile.tool_setup(force=True)
             return
+        except Exception:
+            continue
 
 
 # Configure rar backend on import

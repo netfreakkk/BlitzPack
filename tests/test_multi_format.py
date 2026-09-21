@@ -219,10 +219,9 @@ def test_rar_inspect_test_and_extract(tmp_path: Path):
         import rarfile
         from blitzpack.multi_decompress import _configure_rarfile_backend
         _configure_rarfile_backend()
-        if not getattr(rarfile, "UNRAR_TOOL", None) or not Path(rarfile.UNRAR_TOOL).is_file():
-            pytest.skip("UnRAR tool not available on this system")
-    except ImportError:
-        pytest.skip("rarfile not installed")
+        rarfile.tool_setup(force=True)
+    except Exception:
+        pytest.skip("No working RAR extraction tool available in environment")
 
     import base64
     from blitzpack.utils import ProgressUpdate
